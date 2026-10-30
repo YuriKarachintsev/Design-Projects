@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+tests/_data.json
+tests/_template.csv
