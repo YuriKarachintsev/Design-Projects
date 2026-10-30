@@ -211,3 +211,16 @@ footer.note .cfg { display: grid; grid-template-columns: repeat(auto-fill, minma
   .card { border-color: #ccc; }
 }
 .btn:disabled { opacity: .4; cursor: default; border-color: var(--line-strong); }
+
+/* ---------- B: test strip, normal curve, board header ---------- */
+.teststrip { border: 1px solid var(--ink); border-radius: 3px; padding: 10px 12px; font: 12px/1.9 var(--f-mono); font-variant-numeric: tabular-nums; display: flex; flex-wrap: wrap; gap: 0 14px; background: var(--panel); }
+.teststrip .label { flex-basis: 100%; }
+.teststrip b { font-weight: 600; }
+.teststrip .decision { font-weight: 600; color: var(--ink-2); }
+.teststrip .decision.rej { color: var(--ink); background: #ECEAE4; padding: 0 6px; border-radius: 2px; }
+.how-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.chart.normal { height: 120px; }
+.frow.fhead { cursor: default; padding-top: 10px; padding-bottom: 8px; background: #FBFAF8; }
+.frow.fhead:hover { background: #FBFAF8; }
+.frow .chart.mini { height: 58px; }
+table.plain.compact th, table.plain.compact td { padding: 5px 6px; font-size: 12px; }

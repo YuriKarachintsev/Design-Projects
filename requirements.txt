@@ -1,0 +1,7 @@
+# build.py
+pandas>=2.1
+openpyxl>=3.1
+# analysis/reference_stats.py (verification only)
+numpy>=1.26
+scipy>=1.11
+statsmodels>=0.14

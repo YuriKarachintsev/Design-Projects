@@ -18,7 +18,6 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from scipy import stats
-from statsmodels.stats.multitest import multipletests
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.stats.diagnostic import het_breuschpagan
 
@@ -59,16 +58,6 @@ def valid(d):
     return d if C.INCLUDE_ZERO_ACTUAL else d[~d.zero]
 
 
-def kw(groups):
-    g = [np.asarray(x, float) for x in groups if len(x) > 0]
-    if len(g) < 2:
-        return np.nan
-    try:
-        return float(stats.kruskal(*g).pvalue)
-    except ValueError:
-        return 1.0
-
-
 def ref_level(rows, col, levels):
     vc = rows[col].value_counts()
     return max(levels, key=lambda l: (vc.get(l, 0), -levels.index(l)))
@@ -82,28 +71,60 @@ def full_years(f, t):
     return [y for y in range(C.FIRST_ANALYSIS_YEAR, C.LAST_FULL_YEAR + 1) if y * 12 >= f and y * 12 + 11 <= t]
 
 
-# ----------------------------------------------------------------------------- models
-def cluster_ols(y, X, groups):
-    res = sm.OLS(y, X).fit(cov_type="cluster", cov_kwds={"groups": pd.factorize(groups)[0]}, use_t=True)
-    return res
+
+# ----------------------------------------------------------------------------- the simple test (normal distribution)
+CRIT = C.CRITICAL_VALUE
 
 
-def wald_p(res, names, prefix, G):
-    idx = [i for i, n in enumerate(names) if n.startswith(prefix)]
-    if not idx:
-        return np.nan
-    b = np.asarray(res.params)[idx]
-    V = np.asarray(res.cov_params())[np.ix_(idx, idx)]
-    F = b @ np.linalg.solve(V, b) / len(idx)
-    df2 = G - 1 if G else res.df_resid
-    return float(stats.f.sf(F, len(idx), df2))
+def norm_p(t):
+    return float(2 * stats.norm.sf(abs(t)))
+
+
+def describe(v, proportion=False):
+    v = np.asarray(v, float)
+    n, m = len(v), v.mean()
+    se = np.sqrt(m * (1 - m) / n) if proportion else v.std(ddof=1) / np.sqrt(n)
+    return n, m, se
+
+
+def vs_rest(values, labels, levels, proportion=False, min_n=None):
+    """Each group against the rest: SE_diff = sqrt(SE1^2 + SE2^2), t = diff / SE_diff, normal p."""
+    min_n = C.MIN_N if min_n is None else min_n
+    values, labels = np.asarray(values, float), np.asarray(labels, dtype=object)
+    out = {}
+    for l in levels:
+        a, b = values[labels == l], values[labels != l]
+        if not len(a):
+            continue
+        n, m, se = describe(a, proportion)
+        if n < min_n or len(b) < 2:
+            out[str(l)] = [n, float(m), None, None]
+            continue
+        _, mb, seb = describe(b, proportion)
+        t = (m - mb) / np.sqrt(se ** 2 + seb ** 2)
+        out[str(l)] = [n, float(m), float(t), norm_p(t)]
+    return out
+
+
+def ols_table(y, X, names):
+    """OLS with ordinary SEs (statsmodels), normal p-values: {name: [b, se, t, p]}."""
+    res = sm.OLS(np.asarray(y, float), np.asarray(X, float)).fit()
+    b, se = np.asarray(res.params), np.asarray(res.bse)
+    return res, {n: [float(b[i]), float(se[i]), float(b[i] / se[i]), norm_p(b[i] / se[i])] for i, n in enumerate(names)}
+
+
+def verdict(table, coef=False):
+    ps = [v[3] for v in table.values() if v[3] is not None]
+    status = "CONFIRMED" if any(p < C.ALPHA for p in ps) else ("NO CLEAR GAP" if ps else "LIMITED DATA")
+    mp = min(ps) if ps else np.nan
+    meter = 1 if mp != mp else 5 if mp < 0.001 else 4 if mp < 0.01 else 3 if mp < 0.05 else 2 if mp < 0.10 else 1
+    return {"status": status, "meter": meter}
 
 
 def perf_design(rows, factors, refs=None):
     counts = {t: int((rows.type == t).sum()) for t in TYPES}
-    base = max(TYPES, key=lambda t: counts[t])
-    terms = [t for t in TYPES if t != base and counts[t] >= C.MIN_PROJECTS]
-    pooled = [t for t in TYPES if t != base and 0 < counts[t] < C.MIN_PROJECTS]
+    terms = [t for t in TYPES if t != 1 and counts[t] >= C.MIN_PROJECTS]
+    pooled = [t for t in TYPES if t != 1 and 0 < counts[t] < C.MIN_PROJECTS]
     refs = refs or {"edu": ref_level(rows, "edu", EDUS), "loc": ref_level(rows, "loc", LOCS)}
     eduL = [e for e in EDUS if e != refs["edu"] and (rows.edu == e).any()] if "education" in factors else []
     locL = [l for l in LOCS if l != refs["loc"] and (rows["loc"] == l).any()] if "location" in factors else []
@@ -121,7 +142,7 @@ def perf_design(rows, factors, refs=None):
 def fit_m1(rows, factors, refs=None):
     names, X, pooled, refs = perf_design(rows, factors, refs)
     Xm, y = X(rows), np.log(rows.ah.values)
-    res = cluster_ols(y, Xm, rows.designer.values)
+    res, table = ols_table(y, Xm, names)
     e = pd.Series(y - Xm @ np.asarray(res.params), index=rows.index)
     g = rows.designer
     n_d, m_d = e.groupby(g).size(), e.groupby(g).mean()
@@ -129,56 +150,35 @@ def fit_m1(rows, factors, refs=None):
     sb = max(m_d.var(ddof=1) - sw * np.mean(1 / n_d), 1e-4)
     u = m_d * n_d / (n_d + sw / sb)
     adj = e - u.reindex(g).values
+    sigma = np.sqrt((adj ** 2).sum() / (len(adj) - Xm.shape[1]))
     sst = ((y - y.mean()) ** 2).sum()
-    return dict(names=names, X=X, Xm=Xm, res=res, u=u, sw=sw, sb=sb, adj=adj.values, pooled=pooled, refs=refs,
-                r2=res.rsquared, r2d=1 - (adj ** 2).sum() / sst, smear=np.exp(adj).mean(),
-                q10=np.quantile(adj, 0.1), q90=np.quantile(adj, 0.9), y=y)
+    return dict(names=names, X=X, Xm=Xm, res=res, table=table, u=u, sw=sw, sb=sb, pooled=pooled, refs=refs, y=y, sigma=sigma,
+                r2=res.rsquared, adjr2=res.rsquared_adj, r2d=1 - (adj ** 2).sum() / sst, mf=np.exp(sigma ** 2 / 2))
 
 
 def predict(m, rows_like, designers):
     lin = m["X"](rows_like) @ np.asarray(m["res"].params) + np.array([m["u"].get(d, 0.0) for d in designers])
     med = np.exp(lin)
-    return med, med * m["smear"], med * np.exp(m["q10"]), med * np.exp(m["q90"])
+    z80 = stats.norm.ppf(0.9)
+    return med, med * m["mf"], med * np.exp(-z80 * m["sigma"]), med * np.exp(z80 * m["sigma"])
 
 
-# ----------------------------------------------------------------------------- bootstrap (same generator as the browser)
-def mulberry32(seed, count):
-    k = np.arange(1, count + 1, dtype=np.uint64)
-    a = (np.uint64(seed) + k * np.uint64(0x6D2B79F5)) & np.uint64(0xFFFFFFFF)
-    M = np.uint64(0xFFFFFFFF)
-    imul = lambda x, y: (x * y) & M
-    t = imul(a ^ (a >> np.uint64(15)), a | np.uint64(1))
-    t = ((t + imul(t ^ (t >> np.uint64(7)), t | np.uint64(61))) & M) ^ t
-    return ((t ^ (t >> np.uint64(14))) & M).astype(np.float64) / 4294967296.0
-
-
-def boot_margin(g):
-    n = len(g)
-    u = mulberry32(C.RANDOM_SEED, n * C.BOOTSTRAP_N).reshape(C.BOOTSTRAP_N, n)
-    idx = np.floor(u * n).astype(int)
-    rev, cost = g.rev.values[idx].sum(1), g.cost.values[idx].sum(1)
-    bs = (rev - cost) / rev
-    return [float(np.quantile(bs, 0.05)), float(np.quantile(bs, 0.95))]
-
-
-# ----------------------------------------------------------------------------- trend model
+# ----------------------------------------------------------------------------- trend model (normal 80% PI)
 def trend_fit(xs, ys, shape):
     x = np.asarray(xs, float)
     y = np.log(ys) if shape == "% growth" else np.asarray(ys, float)
-    b, a = np.polyfit(x, y, 1)
-    res = y - (a + b * x)
-    n = len(x)
-    s = np.sqrt(res @ res / (n - 2))
-    return dict(a=a, b=b, s=s, n=n, x=x, y=y, shape=shape, r2=1 - res @ res / ((y - y.mean()) ** 2).sum())
+    res = sm.OLS(y, sm.add_constant(x)).fit()
+    a, b = res.params
+    return dict(a=a, b=b, s=np.sqrt(res.ssr / res.df_resid), n=len(x), x=x, shape=shape, r2=res.rsquared, seb=res.bse[1])
 
 
 def trend_fc(f, x0):
-    t = stats.t.ppf(0.9, f["n"] - 2)
+    z = stats.norm.ppf(0.9)
     se = f["s"] * np.sqrt(1 + 1 / f["n"] + (x0 - f["x"].mean()) ** 2 / ((f["x"] - f["x"].mean()) ** 2).sum())
     m = f["a"] + f["b"] * x0
     if f["shape"] == "% growth":
-        return np.exp(m), np.exp(m - t * se), np.exp(m + t * se)
-    return max(m, 0), max(m - t * se, 0), max(m + t * se, 0)
+        return np.exp(m), np.exp(m - z * se), np.exp(m + z * se)
+    return max(m, 0), max(m - z * se, 0), max(m + z * se, 0)
 
 
 def m2_series(rows, metric, region=None):
@@ -203,8 +203,10 @@ def m2_series(rows, metric, region=None):
     ys = [vals[years.index(y)] for y in years if y >= best[1]] + [est]
     fit = trend_fit(xs, ys, best[2])
     y0, lo, hi = trend_fc(fit, C.FORECAST_YEAR)
+    t = fit["b"] / fit["seb"]
     return dict(values=vals, estimate=est, share=share, chosen=[best[1], best[2]], errLast=best[3], errPartial=best[4],
-                slope=fit["b"], r2=fit["r2"], forecast=[y0, lo, hi], scenarios={"average": y0, "optimistic": hi, "pessimistic": min(lo, est)})
+                slope=[fit["b"], fit["seb"], t, norm_p(t), fit["b"] - CRIT * fit["seb"], fit["b"] + CRIT * fit["seb"]],
+                r2=fit["r2"], s=fit["s"], forecast=[y0, lo, hi], scenarios={"average": y0, "optimistic": hi, "pessimistic": min(lo, est)})
 
 
 # ----------------------------------------------------------------------------- summary (same keys as tests/engine_summary.js)
@@ -214,99 +216,106 @@ def summary(d, opts):
     rows = v[(v.ym >= f) & (v.ym <= t)]
     if opts.get("source") == "original":
         rows = rows[rows.source == "Original"]
-    out = {"n_all": len(d), "n_valid": len(v), "n_zero": int(d.zero.sum())}
-    md = C.MIN_DESIGNER_PROJECTS
+    out = {"n_all": len(d), "n_valid": len(v), "n_zero": int(d.zero.sum()), "n_b": len(rows)}
+    refs = {"edu": ref_level(rows, "edu", EDUS), "loc": ref_level(rows, "loc", LOCS)}
 
-    # B1 output
+    # B1 output: designer-years
     years = full_years(f, t)
     prof = d.groupby("designer").agg(edu=("edu", "first"), loc=("loc", "first"), yrs=("yrs", "first"), rate=("rate", "first"))
     recs = []
     for des, p in prof.iterrows():
-        act = [y for y in years if y >= C.EXPERIENCE_AS_OF - p.yrs]
-        if act:
-            recs.append(dict(designer=des, edu=p.edu, loc=p["loc"], yrs=p.yrs, value=rows[(rows.designer == des) & rows.year.isin(act)].rev.sum() / len(act)))
-    D = pd.DataFrame(recs)
-    rho, sp = stats.spearmanr(D.yrs, D.value)
-    pos = D[D.value > 0]
-    re, rl = ref_level(rows, "edu", EDUS), ref_level(rows, "loc", LOCS)
-    eL, lL = [e for e in EDUS if e != re and (pos.edu == e).any()], [l for l in LOCS if l != rl and (pos["loc"] == l).any()]
-    Xo = np.column_stack([np.ones(len(pos))] + [(pos.edu == e).astype(float) for e in eL] + [(pos["loc"] == l).astype(float) for l in lL] + [pos.yrs.astype(float)])
-    no = ["Intercept"] + [f"Education: {e}" for e in eL] + [f"Location: {l}" for l in lL] + ["Experience"]
-    ro = sm.OLS(np.log(pos.value.values), Xo).fit()
-    out["b1_output"] = dict(edu_p=kw([g.value for _, g in D.groupby("edu")]), loc_p=kw([g.value for _, g in D.groupby("loc")]),
-                            exp_rho=float(rho), exp_p=float(sp), joint_edu_p=wald_p(ro, no, "Education", None),
-                            joint_loc_p=wald_p(ro, no, "Location", None), joint_exp_p=wald_p(ro, no, "Experience", None))
+        for y in years:
+            if y >= C.EXPERIENCE_AS_OF - p.yrs:
+                recs.append(dict(designer=des, edu=p.edu, loc=p["loc"], exp=p.yrs - (C.EXPERIENCE_AS_OF - y),
+                                 value=rows[(rows.designer == des) & (rows.year == y)].rev.sum()))
+    U = pd.DataFrame(recs)
+    _, ox = ols_table(U.value, np.column_stack([np.ones(len(U)), U.exp / 10]), ["Intercept", "Experience (per 10 years)"])
+    eL, lL = [e for e in EDUS if e != refs["edu"]], [l for l in LOCS if l != refs["loc"]]
+    Xa = np.column_stack([np.ones(len(U))] + [(U.edu == e).astype(float) for e in eL] + [(U["loc"] == l).astype(float) for l in lL] + [U.exp / 10])
+    _, oa = ols_table(U.value, Xa, ["Intercept"] + [f"Education: {e}" for e in eL] + [f"Location: {l}" for l in lL] + ["Experience (per 10 years)"])
+    ox.pop("Intercept"); oa.pop("Intercept")
+    oe, ol = vs_rest(U.value, U.edu, EDUS), vs_rest(U.value, U["loc"], LOCS)
+    out["b1_output"] = {"n": len(U), "education": oe, "location": ol, "experience": ox, "all": oa,
+                        "verdicts": [verdict(oe), verdict(ol), verdict(ox), verdict(oa)]}
 
     # B1 performance
-    dt = rows.groupby("designer").agg(n=("pr", "size"), med=("pr", "median"), loc=("loc", "first"), edu=("edu", "first"), mexp=("exp", "median"))
-    dt5 = dt[dt.n >= md]
-    names, X, pooled, refs = perf_design(rows, ["education", "location", "experience"])
-    res = cluster_ols(np.log(rows.ah.values), X(rows), rows.designer.values)
-    G = rows.designer.nunique()
-    pct = lambda n: float(np.exp(res.params[names.index(n)]) - 1) if n in names else None
-    bands = C.EXPERIENCE_BANDS
-    band = np.digitize(rows.exp, bands[1:-1])
-    out["b1_perf"] = dict(edu_p=wald_p(res, names, "Education", G), loc_p=wald_p(res, names, "Location", G), exp_p=wald_p(res, names, "Experience", G),
-                          hs_pct=pct("Education: High school"), master_pct=pct("Education: Master degree"), south_pct=pct("Location: South"),
-                          single_edu_proj_p=kw([np.log(g.pr) for _, g in rows.groupby("edu")]), single_edu_des_p=kw([np.log(g.med) for _, g in dt5.groupby("edu")]),
-                          single_loc_proj_p=kw([np.log(g.pr) for _, g in rows.groupby("loc")]), single_loc_des_p=kw([np.log(g.med) for _, g in dt5.groupby("loc")]),
-                          single_exp_proj_p=kw([np.log(rows.pr[band == i]) for i in range(len(bands) - 1)]),
-                          single_exp_des_p=float(stats.spearmanr(dt5.mexp, dt5.med).pvalue))
+    lnpr = np.log(rows.pr.values)
+    pe, pl = vs_rest(lnpr, rows.edu, EDUS), vs_rest(lnpr, rows["loc"], LOCS)
+    _, px = ols_table(lnpr, np.column_stack([np.ones(len(rows)), rows.exp / 10]), ["Intercept", "Experience at start (per 10 years)"])
+    px.pop("Intercept")
+    names, X, _, _ = perf_design(rows, ["education", "location", "experience"], refs)
+    _, pa = ols_table(np.log(rows.ah.values), X(rows), names)
+    pa.pop("Intercept")
+    pa_f = {k: x for k, x in pa.items() if k.split(":")[0] in ("Education", "Location") or k.startswith("Experience")}
+    out["b1_perf"] = {"education": pe, "location": pl, "experience": px, "all": pa, "verdicts": [verdict(pe), verdict(pl), verdict(px), verdict(pa_f)]}
     full = valid(d)
-    namesF, XF, _, _ = perf_design(full, ["education", "location", "experience"])
-    rf = cluster_ols(np.log(full.ah.values), XF(full), full.designer.values)
+    nF, XF, _, _ = perf_design(full, ["education", "location", "experience"])
+    _, tf = ols_table(np.log(full.ah.values), XF(full), nF)
     out["performanceFactors"] = [k for k, pre in (("education", "Education"), ("location", "Location"), ("experience", "Experience"))
-                                 if wald_p(rf, namesF, pre, full.designer.nunique()) < C.ALPHA]
+                                 if any(n.startswith(pre) and x[3] < C.ALPHA for n, x in tf.items())]
 
-    # B2
-    out["b2"] = dict(per100={l: float(100 * rows[rows["loc"] == l].pr.median()) for l in LOCS}, proj_p=kw([g.pr for _, g in rows.groupby("loc")]),
-                     des_p=kw([g.med for _, g in dt5.groupby("loc")]))
-    # B3
+    # B2 / B3 / B4
+    out["b2"] = {"tests": pl, **verdict(pl)}
+    lc = np.log(rows.rate.values * rows.pr.values)
+    b3l = vs_rest(lc, rows["loc"], LOCS)
+    b3d = vs_rest(lc, rows.designer, list(pd.unique(rows.designer)))
     dd = rows.groupby("designer").agg(ah=("ah", "sum"), ph=("ph", "sum"), rate=("rate", "first"), loc=("loc", "first"), n=("pr", "size"))
-    dd = dd[dd.n >= md].copy()
-    dd["cpph"] = dd.rate * dd.ah / dd.ph
-    a, b = np.log(dd.rate), np.log(dd.ah / dd.ph)
-    yl = np.log(dd.cpph)
+    dd = dd[dd.n >= C.MIN_DESIGNER_PROJECTS]
+    a_, b_ = np.log(dd.rate), np.log(dd.ah / dd.ph)
+    yl = a_ + b_
     eta = 1 - sum(((g - g.mean()) ** 2).sum() for _, g in yl.groupby(dd["loc"])) / ((yl - yl.mean()) ** 2).sum()
-    r5 = rows[rows.designer.isin(dd.index)]
-    out["b3"] = dict(min=[dd.cpph.idxmin(), float(dd.cpph.min())], max=[dd.cpph.idxmax(), float(dd.cpph.max())],
-                     des_p=kw([g.rate * g.pr for _, g in r5.groupby("designer")]), loc_p=kw([g.cpph for _, g in dd.groupby("loc")]),
-                     loc_proj_p=kw([g.rate * g.pr for _, g in rows.groupby("loc")]), share_perf=float(b.var() / (a.var() + b.var())),
-                     share_rate=float(a.var() / (a.var() + b.var())), loc_share=float(eta))
-    # B4
-    ct = pd.crosstab(rows["loc"], rows.cls)
-    ds = rows[rows.designer.isin(dt5.index)].groupby("designer").agg(o=("cls", lambda s: (s == "Overrun").mean()), loc=("loc", "first"))
-    out["b4"] = dict(over={l: float(ct.loc[l, "Overrun"] / ct.loc[l].sum()) for l in LOCS}, chi_p=float(stats.chi2_contingency(ct.values, correction=False)[1]),
-                     des_p=kw([g.o for _, g in ds.groupby("loc")]))
-    out["b4_region"] = dict(chi_p=float(stats.chi2_contingency(pd.crosstab(rows.region, rows.cls).values, correction=False)[1]))
-    # B5
-    yy = rows[rows.year.isin(years)].groupby(["region", "year"]).rev.sum().unstack(fill_value=0).reindex(index=REGIONS, columns=years, fill_value=0)
-    pairs = [(a_, b_, stats.mannwhitneyu(yy.loc[a_], yy.loc[b_], method="asymptotic", use_continuity=True).pvalue) for a_, b_ in itertools.combinations(REGIONS, 2)]
-    adj = multipletests([p for *_, p in pairs], method="holm")[1]
-    med = yy.median(1)
-    leader = med.idxmax()
-    out["b5"] = dict(median={r: float(med[r]) for r in REGIONS}, p=kw([yy.loc[r].values for r in REGIONS]), leader=leader,
-                     proven=[(b_ if a_ == leader else a_) for (a_, b_, _), q in zip(pairs, adj) if leader in (a_, b_) and q < C.ALPHA],
-                     pairs={f"{a_}-{b_}": float(q) for (a_, b_, _), q in zip(pairs, adj)})
-    # B6
-    out["b6"] = dict(margin={f"T{t_}": float(1 - g.cost.sum() / g.rev.sum()) for t_, g in rows.groupby("type")},
-                     ranges={f"T{t_}": boot_margin(g) for t_, g in rows.groupby("type")},
-                     p=kw([1 - g.pr for _, g in rows.groupby("type") if len(g) >= md]))
+    allv = {**{"L" + k: x for k, x in b3l.items()}, **{"D" + k: x for k, x in b3d.items()}}
+    out["b3"] = {"locations": b3l, "designers": b3d, "share_perf": float(b_.var() / (a_.var() + b_.var())), "share_rate": float(a_.var() / (a_.var() + b_.var())),
+                 "loc_share": float(eta), **verdict(allv)}
+    over = (rows.cls == "Overrun").astype(float).values
+    b4l, b4r = vs_rest(over, rows["loc"], LOCS, proportion=True), vs_rest(over, rows.region, REGIONS, proportion=True)
+    out["b4"] = {"loc": b4l, "region": b4r, "verdicts": [verdict(b4l), verdict(b4r)]}
+
+    # B5: region-year totals, each region vs the other regions' yearly totals
+    U5 = pd.DataFrame([dict(region=g, value=rows[(rows.region == g) & (rows.year == y)].rev.sum()) for g in REGIONS for y in years])
+    b5 = vs_rest(U5.value, U5.region, REGIONS, min_n=2) if len(years) >= 2 else {}
+    v5 = verdict(b5)
+    if len(years) < C.MIN_YEARS:
+        v5["status"] = "LIMITED DATA"
+    out["b5"] = {"years": len(years), "tests": b5, **v5}
+
+    # B6: aggregate margin % with the delta-method SE
+    def mse(g):
+        A, P = g.actual.values, g.planned.values
+        R = A.sum() / P.sum()
+        n = len(g)
+        return 1 - R, (np.sqrt(((A - R * P) ** 2).sum() / (n * (n - 1))) / P.mean()) if n > 1 else np.nan
+    b6 = {}
+    for t_ in TYPES:
+        g, o = rows[rows.type == t_], rows[rows.type != t_]
+        if not len(g):
+            continue
+        m, se = mse(g)
+        if len(g) < C.MIN_N:
+            b6[f"T{t_}"] = [len(g), float(m), float(se), None, None]
+        else:
+            mo, seo = mse(o)
+            tt = (m - mo) / np.sqrt(se ** 2 + seo ** 2)
+            b6[f"T{t_}"] = [len(g), float(m), float(se), float(tt), norm_p(tt)]
+    lead = max(b6, key=lambda k: b6[k][1])
+    ci = {k: (x[1] - CRIT * x[2], x[1] + CRIT * x[2]) for k, x in b6.items()}
+    watching = b6[lead][3] is None and any(k != lead and ci[k][1] >= ci[lead][0] and ci[k][0] <= ci[lead][1] for k in b6)
+    out["b6"] = {"tests": b6, "watching": bool(watching), **verdict({k: [x[0], x[1], x[3], x[4]] for k, x in b6.items()})}
     if opts.get("bOnly"):
         return out
 
     # M1
     train = v[v.year <= C.LAST_FULL_YEAR]
     m = fit_m1(train, out["performanceFactors"])
-    pr_ = m["res"]
     vif = [variance_inflation_factor(m["Xm"], i) for i in range(1, m["Xm"].shape[1])]
-    out["m1"] = dict(n=len(train), coefs=dict(zip(m["names"], map(float, pr_.params))), p=dict(zip(m["names"], map(float, pr_.pvalues))),
-                     r2=float(m["r2"]), r2_designer=float(m["r2d"]), resSD=float(np.sqrt(pr_.ssr / pr_.df_resid)), smear=float(m["smear"]),
-                     range=[float(np.exp(m["q10"])), float(np.exp(m["q90"]))], vif_max=float(max(vif)), sw=float(m["sw"]), sb=float(m["sb"]),
-                     pooled=m["pooled"], bp_p=float(het_breuschpagan(sm.OLS(m["y"], m["Xm"]).fit().resid, m["Xm"])[1]))
+    out["m1"] = dict(n=len(train), coefs=m["table"], r2=float(m["r2"]), adjR2=float(m["adjr2"]), r2_designer=float(m["r2d"]),
+                     resSD=float(np.sqrt(m["res"].ssr / m["res"].df_resid)), sigma=float(m["sigma"]), meanFactor=float(m["mf"]),
+                     range=[float(np.exp(-stats.norm.ppf(0.9) * m["sigma"])), float(np.exp(stats.norm.ppf(0.9) * m["sigma"]))],
+                     sw=float(m["sw"]), sb=float(m["sb"]), vif_max=float(max(vif)), pooled=m["pooled"],
+                     bp_p=float(het_breuschpagan(m["res"].resid, m["Xm"])[1]))
     tr, te = train[train.year <= C.BACKTEST_LAST_TRAIN_YEAR], train[train.year > C.BACKTEST_LAST_TRAIN_YEAR]
-    mb = fit_m1(tr, out["performanceFactors"])
-    med_, mean_, lo_, hi_ = predict(mb, te, te.designer.values)
+    mb = fit_m1(tr, out["performanceFactors"], m["refs"])
+    _, mean_, lo_, hi_ = predict(mb, te, te.designer.values)
     act = te.ah.values
 
     def met(p, lo=None, hi=None):
@@ -315,10 +324,9 @@ def summary(d, opts):
                     coverage=float(((act >= lo) & (act <= hi)).mean()) if lo is not None else None, n=len(act))
     out["backtest"] = dict(n=len(te), plans=met(te.ph.values), ratio=met(te.ph.values * realised(tr)), m1=met(mean_, lo_, hi_))
     # C1
-    comp = train
     c1 = []
     for t_ in TYPES:
-        g = comp[comp.type == t_]
+        g = train[train.type == t_]
         if not len(g):
             continue
         ph = g.ph.median()
@@ -328,27 +336,25 @@ def summary(d, opts):
         w = pool.designer.value_counts() / len(pool)
         probe = pd.DataFrame({"ph": ph, "type": t_, "edu": prof.loc[w.index].edu.values, "loc": prof.loc[w.index]["loc"].values,
                               "exp": (prof.loc[w.index].yrs - (C.EXPERIENCE_AS_OF - C.FORECAST_YEAR)).values})
-        md_, mn_, lo_, hi_ = predict(m, probe, list(w.index))
+        _, mn_, lo_, hi_ = predict(m, probe, list(w.index))
         rate = prof.loc[w.index].rate.values
         cost, plan = (w.values * mn_ * rate).sum(), (w.values * ph * rate).sum()
         c1.append(dict(type=t_, plannedH=float(ph), hours=float((w.values * mn_).sum()), cost=float(cost), plan=float(plan), pct=float(cost / plan),
                        lo=float((w.values * lo_ * rate).sum()), hi=float((w.values * hi_ * rate).sum()), benchmark=float(plan * realised(g))))
     out["c1"] = c1
-    # M2
+    # M2, C4, C2/C3
     vol = d if C.ZERO_ACTUAL_IN_VOLUMES else v
     M2 = {k: m2_series(vol, k) for k in ["revenue", "cost", "plannedHours", "actualHours", "projects"]}
     out["m2_revenue"] = M2["revenue"]
     out["m2_chosen"] = {k: s["chosen"] + s["forecast"] for k, s in M2.items()}
     last = v[v.year.between(C.LAST_FULL_YEAR - C.COST_RATIO_YEARS + 1, C.LAST_FULL_YEAR)]
     ratio = last.cost.sum() / last.rev.sum()
-    rev = M2["revenue"]["scenarios"]["average"]
-    out["c4"] = dict(ratio=float(ratio), average=dict(revenue=rev, cost=rev * ratio, margin=rev * (1 - ratio), marginPct=1 - ratio,
-                     projects=M2["projects"]["scenarios"]["average"]), projects=[M2["projects"]["scenarios"]["average"]] + M2["projects"]["forecast"][1:])
-    # C2 / C3
-    cr = comp.groupby("designer").agg(ah=("ah", "sum"), ph=("ph", "sum"), n=("ah", "size"))
-    dept = comp.ah.sum() / comp.ph.sum()
-    w = cr.n / (cr.n + C.SHRINK_K_PROJECTS)
-    prs = w * cr.ah / cr.ph + (1 - w) * dept
+    out["c4"] = {"ratio": float(ratio), "scenarios": {k: dict(revenue=M2["revenue"]["scenarios"][k], cost=M2["revenue"]["scenarios"][k] * ratio,
+                 margin=M2["revenue"]["scenarios"][k] * (1 - ratio), marginPct=1 - ratio, projects=M2["projects"]["scenarios"][k]) for k in ["pessimistic", "average", "optimistic"]}}
+    cr = train.groupby("designer").agg(ah=("ah", "sum"), ph=("ph", "sum"), n=("ah", "size"))
+    dept = train.ah.sum() / train.ph.sum()
+    wgt = cr.n / (cr.n + C.SHRINK_K_PROJECTS)
+    prs = wgt * cr.ah / cr.ph + (1 - wgt) * dept
     sh = vol[vol.year.between(C.WORKLOAD_SHARE_FIRST_YEAR, C.PARTIAL_YEAR)].groupby(["designer", "region"]).ph.sum()
     sh = sh / sh.sum()
     P = M2["plannedHours"]["scenarios"]["average"]

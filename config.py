@@ -30,7 +30,8 @@ MIN_DESIGNERS = 3
 MIN_YEARS = 3
 MIN_DESIGNER_PROJECTS = 5
 
-BOOTSTRAP_N = 4000
+CRITICAL_VALUE = 1.96       # 5% significance, two-sided, normal distribution
+MIN_N = 30                  # a group needs at least this many units to be tested (normal approximation)
 RANDOM_SEED = 2026
 SHRINK_K_PROJECTS = 10
 

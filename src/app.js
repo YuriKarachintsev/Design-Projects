@@ -14,6 +14,7 @@
   DD.setDataset = function (raw, meta) {
     DD.raw = raw;
     DD.meta = meta;
+    S.setCritical(cfg.CRITICAL_VALUE);
     DD.data = A.prepare(raw, cfg);
     DD.perf = A.performanceFactors(DD.data, cfg);
     DD.emit('data');
@@ -77,7 +78,7 @@
     tab: 'A',
     A: { from: null, to: null, types: [1, 2, 3, 4], regions: ['North', 'East', 'South', 'West'], gran: 'monthly', attr: 'start' },
     B: { source: 'all', stats: false, open: [] },
-    C: { scenario: 'average', stats: false },
+    C: { scenario: 'average', stats: false, overrides: {} },
   };
   DD.readHash = function () {
     const h = new URLSearchParams(location.hash.slice(1));

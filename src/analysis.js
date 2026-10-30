@@ -5,7 +5,7 @@
 (function (root) {
   'use strict';
   const S = root.DDStats || (typeof require === 'function' ? require('./stats.js') : null);
-  const { sum, mean, median, quantile, kruskal, spearman, chiSquare, mannWhitney, holm, ols, waldF } = S;
+  const { sum, mean, median, quantile, ols } = S;
 
   const TYPES = [1, 2, 3, 4];
   const REGIONS = ['North', 'East', 'South', 'West'];
@@ -149,7 +149,7 @@
       flows: [...flows.entries()].map(([k, v]) => ({ from: k.split('>')[0], to: k.split('>')[1], hours: v })), n: started.length, nDesigners: new Set(started.map(r => r.designer)).size };
   }
 
-  // ================================================================ TAB B
+  // ================================================================ TAB B · simple standard-error tests
   /** Rows for tab B: valid rows inside the period, all sources or Original only. */
   function rowsB(data, opt) {
     return data.valid.filter(r => r.ym >= opt.from && r.ym <= opt.to && (opt.source !== 'original' || r.source === 'Original'));
@@ -159,67 +159,37 @@
     for (let y = cfg.FIRST_ANALYSIS_YEAR; y <= cfg.LAST_FULL_YEAR; y++) if (ym(y, 1) >= opt.from && ym(y, 12) <= opt.to) ys.push(y);
     return ys;
   }
-  const minDes = (cfg) => cfg.MIN_DESIGNER_PROJECTS;
+  const byType = (rows, t) => (t && t !== 'all' ? rows.filter(r => r.type === +t) : rows);
+  const vsRest = (values, labels, levels, cfg, opts = {}) => S.vsRest(values, labels, levels, { minN: opts.minN === undefined ? cfg.MIN_N : opts.minN, alpha: cfg.ALPHA, proportion: opts.proportion });
 
-  /** Designer-level summaries used by several questions. */
-  function designerTable(rows, data) {
-    return [...groupBy(rows, 'designer').entries()].map(([d, rr]) => {
-      const info = data.designers.get(d);
-      return { designer: d, n: rr.length, loc: info.loc, edu: info.edu, yrs: info.yrs, rate: info.rate, medPR: median(rr.map(r => r.pr)),
-        rpr: realisedPR(rr), medExp: median(rr.map(r => r.exp)), rows: rr };
-    });
+  /** Summary of a set of comparisons: the headline is the tested comparison with the largest |t|. */
+  function summarise(tests) {
+    const tested = tests.filter(t => Number.isFinite(t.p));
+    const head = tested.slice().sort((a, b) => Math.abs(b.t) - Math.abs(a.t))[0] || null;
+    const minP = tested.length ? Math.min(...tested.map(t => t.p)) : NaN;
+    const status = tested.some(t => t.reject) ? 'CONFIRMED' : (!tested.length ? 'LIMITED DATA' : 'NO CLEAR GAP');
+    return { head, minP, status, meter: meter(minP), nTested: tested.length, nRejected: tested.filter(t => t.reject).length };
   }
-
-  function status(parts) {
-    // parts: [{p (deciding), pProject (optional), limited}]
-    const conf = parts.filter(x => x.p < x.alpha);
-    if (parts.length > 1 && conf.length && conf.length < parts.length) return 'PARTLY';
-    if (conf.length && conf.length === parts.length) return 'CONFIRMED';
-    if (parts.some(x => x.limited)) return 'LIMITED DATA';
-    if (parts.some(x => x.pProject < x.alpha)) return 'FEW DESIGNERS';
-    return 'NO CLEAR GAP';
-  }
+  /** Regression coefficients as comparisons (t = b / SE). */
+  const coefTests = (fit, skip = ['Intercept']) => fit.coefs.filter(c => !skip.includes(c.name)).map(c => ({ ...c, level: c.name, diff: c.b, seDiff: c.se }));
 
   // ---- B1
-  function b1Output(rows, data, opt, cfg) {
-    const years = fullYears(opt, cfg), metric = opt.metric || 'revenue';
-    const out = [];
+  function designerYears(rows, data, opt, cfg, metric) {
+    const years = fullYears(opt, cfg), out = [];
     data.designers.forEach(info => {
-      const act = years.filter(y => y >= info.careerStart);
-      if (!act.length) return;
-      const rr = rows.filter(r => r.designer === info.name && act.includes(r.year));
-      const tot = metric === 'hours' ? sum(rr.map(r => r.ah)) : metric === 'projects' ? rr.length : sum(rr.map(r => r.rev));
-      out.push({ designer: info.name, loc: info.loc, edu: info.edu, yrs: info.yrs, years: act.length, value: tot / act.length });
+      years.filter(y => y >= info.careerStart).forEach(y => {
+        const rr = rows.filter(r => r.designer === info.name && r.year === y);
+        const v = metric === 'hours' ? sum(rr.map(r => r.ah)) : metric === 'projects' ? rr.length : sum(rr.map(r => r.rev));
+        out.push({ designer: info.name, loc: info.loc, edu: info.edu, year: y, exp: info.yrs - (cfg.EXPERIENCE_AS_OF - y), value: v });
+      });
     });
-    const groupTest = key => {
-      const levels = key === 'loc' ? data.locations : EDUS;
-      const groups = levels.map(l => out.filter(d => d[key] === l).map(d => d.value));
-      const kw = kruskal(groups);
-      return { test: 'Kruskal-Wallis on designer mean annual output', ...kw, groups: levels.map((l, i) => ({ level: l, values: groups[i], median: median(groups[i]), nDesigners: groups[i].length })), p: kw.p };
-    };
-    const sp = spearman(out.map(d => d.yrs), out.map(d => d.value));
-    const res = { unit: 'designer-year', years, designers: out, education: groupTest('edu'), location: groupTest('loc'),
-      experience: { test: 'Spearman', ...sp } };
-    // All together: OLS of log(mean annual output) on education, location and experience (n = designers)
-    const pos = out.filter(d => d.value > 0);
-    const refEdu = refLevel(rows, 'edu', EDUS), refLoc = refLevel(rows, 'loc', data.locations);
-    const eduL = EDUS.filter(e => e !== refEdu && pos.some(d => d.edu === e)), locL = data.locations.filter(l => l !== refLoc && pos.some(d => d.loc === l));
-    const names = ['Intercept', ...eduL.map(e => 'Education: ' + e), ...locL.map(l => 'Location: ' + l), 'Experience (years)'];
-    const X = pos.map(d => [1, ...eduL.map(e => +(d.edu === e)), ...locL.map(l => +(d.loc === l)), d.yrs]);
-    try {
-      const fit = ols(pos.map(d => Math.log(d.value)), X, names);
-      const idx = pre => names.map((n, i) => n.startsWith(pre) ? i : -1).filter(i => i >= 0);
-      res.joint = { n: pos.length, refEdu, refLoc, coefs: fit.coefs.slice(1), r2: fit.r2,
-        tests: { education: waldF(fit, idx('Education')), location: waldF(fit, idx('Location')), experience: waldF(fit, idx('Experience')) } };
-    } catch (e) { res.joint = null; }
-    return res;
+    return { years, units: out };
   }
-
-  /** The performance model shared by B1 "All together" and M1: ln(actual h) on ln(planned h),
-   * type terms (types with >= MIN_PROJECTS, others pooled into the baseline type), and factors. */
+  /** The performance model shared by B1 "All together" and M1: ln(actual h) on ln(planned h), type terms
+   * (types with >= MIN_PROJECTS; smaller types pooled into the baseline type) and the chosen factors. */
   function perfDesign(rows, data, factors, cfg, refs) {
     const counts = TYPES.map(t => rows.filter(r => r.type === t).length);
-    const baseType = TYPES[counts.indexOf(Math.max(...counts))];
+    const baseType = 1;
     const typeTerms = TYPES.filter(t => t !== baseType && counts[t - 1] >= cfg.MIN_PROJECTS);
     const pooled = TYPES.filter(t => t !== baseType && counts[t - 1] > 0 && counts[t - 1] < cfg.MIN_PROJECTS);
     refs = refs || { edu: refLevel(rows, 'edu', EDUS), loc: refLevel(rows, 'loc', data.locations) };
@@ -228,220 +198,192 @@
     const useExp = factors.includes('experience');
     const names = ['Intercept', 'ln(planned hours)', ...typeTerms.map(t => 'Type ' + t), ...eduL.map(e => 'Education: ' + e), ...locL.map(l => 'Location: ' + l), ...(useExp ? ['Experience at start (years)'] : [])];
     const row = x => [1, Math.log(x.ph), ...typeTerms.map(t => +(x.type === t)), ...eduL.map(e => +(x.edu === e)), ...locL.map(l => +(x.loc === l)), ...(useExp ? [x.exp] : [])];
-    return { names, row, baseType, typeTerms, pooled, refs, eduL, locL, useExp };
+    return { names, row, baseType, typeTerms, pooled, refs, eduL, locL, useExp, counts };
   }
-
-  function b1Performance(rows, data, opt, cfg) {
-    const md = minDes(cfg), dt = designerTable(rows, data).filter(d => d.n >= md);
-    const bands = cfg.EXPERIENCE_BANDS, bl = bandLabels(bands);
-    const single = {};
-    [['education', 'edu', EDUS], ['location', 'loc', data.locations]].forEach(([k, key, levels]) => {
-      const proj = kruskal(levels.map(l => rows.filter(r => r[key] === l).map(r => Math.log(r.pr))));
-      const des = kruskal(levels.map(l => dt.filter(d => d[key] === l).map(d => Math.log(d.medPR))));
-      single[k] = { project: proj, designer: des, groups: levels.map(l => ({ level: l, medianPR: median(rows.filter(r => r[key] === l).map(r => r.pr)), n: rows.filter(r => r[key] === l).length,
-        nDesigners: new Set(rows.filter(r => r[key] === l).map(r => r.designer)).size, designerMedians: dt.filter(d => d[key] === l).map(d => ({ designer: d.designer, v: d.medPR, n: d.n })) })) };
-    });
-    const projE = kruskal(bl.map((_, i) => rows.filter(r => expBand(r.exp, bands) === i).map(r => Math.log(r.pr))));
-    const desE = spearman(dt.map(d => d.medExp), dt.map(d => d.medPR));
-    single.experience = { project: projE, designer: desE, groups: bl.map((l, i) => { const rr = rows.filter(r => expBand(r.exp, bands) === i); return { level: l, medianPR: median(rr.map(r => r.pr)), n: rr.length, nDesigners: new Set(rr.map(r => r.designer)).size }; }),
-      points: dt.map(d => ({ designer: d.designer, x: d.medExp, y: d.medPR, n: d.n, loc: d.loc })) };
-    // All together
-    const des = perfDesign(rows, data, ['education', 'location', 'experience'], cfg);
-    let joint = null;
-    try {
-      const fit = ols(rows.map(r => Math.log(r.ah)), rows.map(des.row), des.names, rows.map(r => r.designer));
-      const idx = pre => des.names.map((n, i) => n.startsWith(pre) ? i : -1).filter(i => i >= 0);
-      joint = { n: rows.length, G: fit.G, coefs: fit.coefs, r2: fit.r2, refs: des.refs, pooled: des.pooled, baseType: des.baseType,
-        tests: { education: waldF(fit, idx('Education')), location: waldF(fit, idx('Location')), experience: waldF(fit, idx('Experience')) } };
-    } catch (e) { joint = null; }
-    return { single, joint };
-  }
+  const factorOf = name => (name.startsWith('Education') ? 'education' : name.startsWith('Location') ? 'location' : name.startsWith('Experience') ? 'experience' : null);
 
   function b1(rows, data, opt, cfg) {
-    const view = opt.view || 'output', factor = opt.factor || 'experience';
-    const out = view === 'output' ? b1Output(rows, data, opt, cfg) : null;
-    const perf = view === 'performance' ? b1Performance(rows, data, opt, cfg) : null;
-    const A = cfg.ALPHA, parts = [];
-    ['experience', 'education', 'location'].forEach(k => {
-      if (view === 'output') {
-        const p = factor === 'all' && out.joint ? out.joint.tests[k].p : out[k].p;
-        parts.push({ key: k, p, alpha: A });
+    const view = opt.view || 'output', factor = opt.factor || 'experience', metric = opt.metric || 'revenue';
+    const refs = { edu: refLevel(rows, 'edu', EDUS), loc: refLevel(rows, 'loc', data.locations) };
+    const res = { view, factor, metric, refs };
+    if (view === 'output') {
+      const dy = designerYears(rows, data, opt, cfg, metric), u = dy.units;
+      Object.assign(res, { unit: 'designer-year', years: dy.years, units: u, n: u.length });
+      if (factor === 'education' || factor === 'location') {
+        const key = factor === 'education' ? 'edu' : 'loc';
+        res.tests = vsRest(u.map(x => x.value), u.map(x => x[key]), factor === 'education' ? EDUS : data.locations, cfg);
+        res.tests.forEach(t => { t.nDesigners = new Set(u.filter(x => x[key] === t.level).map(x => x.designer)).size; });
+        res.points = u;
+      } else if (factor === 'experience') {
+        const fit = ols(u.map(x => x.value), u.map(x => [1, x.exp / 10]), ['Intercept', 'Experience (per 10 years)']);
+        res.fit = fit; res.tests = coefTests(fit); res.points = u;
       } else {
-        if (factor === 'all' && perf.joint) parts.push({ key: k, p: perf.joint.tests[k].p, alpha: A });
-        else parts.push({ key: k, p: perf.single[k].designer.p, pProject: perf.single[k].project.p, alpha: A });
+        const eduL = EDUS.filter(e => e !== refs.edu), locL = data.locations.filter(l => l !== refs.loc);
+        const names = ['Intercept', ...eduL.map(e => 'Education: ' + e), ...locL.map(l => 'Location: ' + l), 'Experience (per 10 years)'];
+        const fit = ols(u.map(x => x.value), u.map(x => [1, ...eduL.map(e => +(x.edu === e)), ...locL.map(l => +(x.loc === l)), x.exp / 10]), names);
+        res.fit = fit; res.tests = coefTests(fit);
       }
-    });
-    const st = status(parts);
-    return { view, factor, output: out, performance: perf, parts, status: st, meter: meter(Math.min(...parts.map(x => x.p).filter(Number.isFinite))) };
+    } else {
+      const y = rows.map(r => Math.log(r.pr));
+      res.unit = 'project'; res.n = rows.length;
+      if (factor === 'education' || factor === 'location') {
+        const key = factor === 'education' ? 'edu' : 'loc';
+        res.tests = vsRest(y, rows.map(r => r[key]), factor === 'education' ? EDUS : data.locations, cfg);
+        res.tests.forEach(t => { t.nDesigners = new Set(rows.filter(r => r[key] === t.level).map(r => r.designer)).size; });
+        res.log = true;
+      } else if (factor === 'experience') {
+        const fit = ols(y, rows.map(r => [1, r.exp / 10]), ['Intercept', 'Experience at start (per 10 years)']);
+        res.fit = fit; res.tests = coefTests(fit); res.log = true;
+        res.points = designerTable(rows, data).map(d => ({ designer: d.designer, x: d.medExp, y: d.gmPR, n: d.n, loc: d.loc }));
+      } else {
+        const des = perfDesign(rows, data, ['education', 'location', 'experience'], cfg, refs);
+        const fit = ols(rows.map(r => Math.log(r.ah)), rows.map(des.row), des.names);
+        res.fit = fit; res.design = des; res.tests = coefTests(fit, ['Intercept', 'ln(planned hours)', ...des.typeTerms.map(t => 'Type ' + t)]);
+        res.allCoefs = coefTests(fit, ['Intercept']);
+      }
+    }
+    return Object.assign(res, summarise(res.tests));
   }
-  /** Designer factors whose joint Wald p < ALPHA in the performance model (full data, default controls). */
+  function designerTable(rows, data) {
+    return [...groupBy(rows, 'designer').entries()].map(([d, rr]) => {
+      const info = data.designers.get(d);
+      return { designer: d, n: rr.length, loc: info.loc, edu: info.edu, rate: info.rate, gmPR: Math.exp(mean(rr.map(r => Math.log(r.pr)))), rpr: realisedPR(rr), medExp: median(rr.map(r => r.exp)), rows: rr };
+    });
+  }
+  /** Factors with at least one coefficient rejected at 5% in the performance "All together" model,
+   * computed on the full dataset with default controls. Tab C uses this list. */
   function performanceFactors(data, cfg) {
     const opt = { from: data.minYM, to: data.maxYM, source: 'all' };
-    const p = b1Performance(rowsB(data, opt), data, opt, cfg);
-    return { factors: p.joint ? ['education', 'location', 'experience'].filter(k => p.joint.tests[k].p < cfg.ALPHA) : [], tests: p.joint ? p.joint.tests : {} };
+    let r;
+    try { r = b1(rowsB(data, opt), data, { ...opt, view: 'performance', factor: 'all' }, cfg); } catch (e) { return { factors: [], tests: [], error: 'The performance model cannot be fitted on this data.' }; }
+    const factors = ['education', 'location', 'experience'].filter(f => r.tests.some(t => factorOf(t.level) === f && t.reject));
+    return { factors, tests: r.tests };
   }
 
   // ---- B2
   function b2(rows, data, opt, cfg) {
-    const rr = opt.type && opt.type !== 'all' ? rows.filter(r => r.type === +opt.type) : rows;
-    const md = minDes(cfg), dt = designerTable(rr, data).filter(d => d.n >= md);
-    const planned = opt.plannedH || 100;
-    const groups = data.locations.map(l => {
-      const g = rr.filter(r => r.loc === l);
-      return { level: l, n: g.length, nDesigners: new Set(g.map(r => r.designer)).size, per100: 100 * median(g.map(r => r.pr)),
-        q1: 100 * quantile(g.map(r => r.pr), 0.25), q3: 100 * quantile(g.map(r => r.pr), 0.75), expected: planned * median(g.map(r => r.pr)),
-        designers: dt.filter(d => d.loc === l).map(d => ({ designer: d.designer, v: 100 * d.medPR, n: d.n })) };
-    });
-    const proj = kruskal(data.locations.map(l => rr.filter(r => r.loc === l).map(r => r.pr)));
-    const des = kruskal(data.locations.map(l => dt.filter(d => d.loc === l).map(d => d.medPR)));
-    const limited = groups.some(g => g.n > 0 && (g.n < cfg.MIN_PROJECTS || g.nDesigners < cfg.MIN_DESIGNERS));
-    const parts = [{ p: des.p, pProject: proj.p, alpha: cfg.ALPHA, limited }];
-    return { groups, project: proj, designer: des, nDesigners: dt.length, plannedH: planned, status: status(parts), meter: meter(des.p) };
+    const rr = byType(rows, opt.type);
+    const tests = vsRest(rr.map(r => Math.log(r.pr)), rr.map(r => r.loc), data.locations, cfg);
+    tests.forEach(t => { t.nDesigners = new Set(rr.filter(r => r.loc === t.level).map(r => r.designer)).size; });
+    return { tests, log: true, n: rr.length, overall: Math.exp(mean(rr.map(r => Math.log(r.pr)))), plannedH: opt.plannedH || 100, ...summarise(tests) };
   }
 
   // ---- B3
   function b3(rows, data, opt, cfg) {
-    const rr = opt.type && opt.type !== 'all' ? rows.filter(r => r.type === +opt.type) : rows;
-    const md = minDes(cfg), dtAll = designerTable(rr, data), dt = dtAll.filter(d => d.n >= md);
-    dt.forEach(d => { d.cpph = d.rate * d.rpr; });
-    const locTest = kruskal(data.locations.map(l => dt.filter(d => d.loc === l).map(d => d.cpph)));
-    const locProj = kruskal(data.locations.map(l => rr.filter(r => r.loc === l).map(r => r.rate * r.pr)));
-    const desTest = kruskal(dt.map(d => d.rows.map(r => r.rate * r.pr)));
-    const y = dt.map(d => Math.log(d.cpph)), a = dt.map(d => Math.log(d.rate)), b = dt.map(d => Math.log(d.rpr));
-    const va = S.variance(a), vb = S.variance(b);
-    const my = mean(y), sst = sum(y.map(v => (v - my) ** 2));
-    let ssw = 0; data.locations.forEach(l => { const g = dt.filter(d => d.loc === l).map(d => Math.log(d.cpph)); const m = mean(g); g.forEach(v => { ssw += (v - m) ** 2; }); });
-    const locations = data.locations.map(l => { const g = dt.filter(d => d.loc === l); return { level: l, median: median(g.map(d => d.cpph)), nDesigners: g.length, n: sum(g.map(d => d.n)), rate: g.length ? g[0].rate : NaN }; });
-    const parts = [{ key: 'designers', p: desTest.p, alpha: cfg.ALPHA }, { key: 'locations', p: locTest.p, pProject: locProj.p, alpha: cfg.ALPHA }];
-    let st = status(parts);
-    if (st === 'NO CLEAR GAP' && locProj.p < cfg.ALPHA) st = 'FEW DESIGNERS';
-    const excluded = dtAll.filter(d => d.n < md).map(d => ({ designer: d.designer, n: d.n }));
-    return { designers: dt.map(d => ({ designer: d.designer, loc: d.loc, rate: d.rate, rpr: d.rpr, cpph: d.cpph, n: d.n })).sort((p, q) => p.cpph - q.cpph),
-      excluded, locations, locTest, locProj, desTest, shares: { performance: vb / (va + vb), rate: va / (va + vb) }, locationShare: sst ? 1 - ssw / sst : NaN,
-      status: st, meter: meter(Math.min(desTest.p, locTest.p)) };
+    const rr = byType(rows, opt.type), y = rr.map(r => Math.log(r.rate * r.pr));
+    const locations = vsRest(y, rr.map(r => r.loc), data.locations, cfg);
+    locations.forEach(t => { t.nDesigners = new Set(rr.filter(r => r.loc === t.level).map(r => r.designer)).size; t.rate = (data.designers.get(rr.find(r => r.loc === t.level).designer) || {}).rate; });
+    const names = [...new Set(rr.map(r => r.designer))];
+    const designers = vsRest(y, rr.map(r => r.designer), names, cfg);
+    designers.forEach(t => { const info = data.designers.get(t.level); t.loc = info.loc; t.rate = info.rate; });
+    // What drives cost (descriptive): across designers with >= MIN_DESIGNER_PROJECTS projects
+    const dt = designerTable(rr, data).filter(d => d.n >= cfg.MIN_DESIGNER_PROJECTS);
+    const ly = dt.map(d => Math.log(d.rate * d.rpr)), la = dt.map(d => Math.log(d.rate)), lb = dt.map(d => Math.log(d.rpr));
+    const va = S.variance(la), vb = S.variance(lb), my = mean(ly), sst = sum(ly.map(v => (v - my) ** 2));
+    let ssw = 0; data.locations.forEach(l => { const g = dt.filter(d => d.loc === l).map(d => Math.log(d.rate * d.rpr)); const m = mean(g); g.forEach(v => { ssw += (v - m) ** 2; }); });
+    const all = locations.concat(designers);
+    return { locations, designers, log: true, n: rr.length, overall: Math.exp(mean(y)), shares: { performance: vb / (va + vb), rate: va / (va + vb) }, locationShare: sst ? 1 - ssw / sst : NaN,
+      nDriveDesigners: dt.length, locSummary: summarise(locations), desSummary: summarise(designers), ...summarise(all) };
   }
 
   // ---- B4
   function b4(rows, data, opt, cfg) {
-    const rr = opt.type && opt.type !== 'all' ? rows.filter(r => r.type === +opt.type) : rows;
-    const by = opt.groupBy === 'region' ? 'region' : 'loc', levels = by === 'loc' ? data.locations : REGIONS;
+    const rr = byType(rows, opt.type), by = opt.groupBy === 'region' ? 'region' : 'loc', levels = by === 'loc' ? data.locations : REGIONS;
     const focus = opt.mode === 'under' ? 'Underrun' : 'Overrun';
-    const groups = levels.map(l => {
-      const g = rr.filter(r => r[by] === l), c = {};
-      CLASSES.forEach(k => { c[k] = g.filter(r => r.cls === k).length; });
+    const tests = vsRest(rr.map(r => +(r.cls === focus)), rr.map(r => r[by]), levels, cfg, { proportion: true });
+    const mix = levels.map(l => {
+      const g = rr.filter(r => r[by] === l), c = {}; CLASSES.forEach(k => { c[k] = g.filter(r => r.cls === k).length; });
       return { level: l, n: g.length, nDesigners: new Set(g.map(r => r.designer)).size, counts: c, shares: Object.fromEntries(CLASSES.map(k => [k, g.length ? c[k] / g.length : NaN])),
         overMoney: sum(g.filter(r => r.cls === 'Overrun').map(r => r.actual - r.planned)), underMoney: sum(g.filter(r => r.cls === 'Underrun').map(r => r.planned - r.actual)) };
-    });
-    const chi = chiSquare(groups.map(g => CLASSES.map(k => g.counts[k])));
-    const md = minDes(cfg), dt = designerTable(rr, data).filter(d => d.n >= md);
-    const dots = dt.map(d => ({ designer: d.designer, group: by === 'loc' ? d.loc : null, n: d.n, share: d.rows.filter(r => r.cls === focus).length / d.n }));
-    let desTest = null;
-    if (by === 'loc') desTest = kruskal(data.locations.map(l => dots.filter(d => d.group === l).map(d => d.share)));
-    const parts = by === 'loc' ? [{ p: desTest.p, pProject: chi.p, alpha: cfg.ALPHA }] : [{ p: chi.p, alpha: cfg.ALPHA }];
-    return { by, focus, groups, chi, designerTest: desTest, dots: by === 'loc' ? dots : [], status: status(parts), meter: meter(by === 'loc' ? desTest.p : chi.p) };
+    }).filter(g => g.n);
+    tests.forEach(t => { t.nDesigners = mix.find(m => m.level === t.level).nDesigners; });
+    return { by, focus, tests, mix, n: rr.length, overall: mean(rr.map(r => +(r.cls === focus))), ...summarise(tests) };
   }
 
   // ---- B5
   function b5(rows, data, opt, cfg) {
-    const rr = opt.type && opt.type !== 'all' ? rows.filter(r => r.type === +opt.type) : rows;
-    const years = fullYears(opt, cfg), metric = opt.metric === 'margin' ? 'margin' : 'rev';
-    const totals = REGIONS.map(g => years.map(y => sum(rr.filter(r => r.region === g && r.year === y).map(r => r[metric]))));
-    const regions = REGIONS.map((g, i) => ({ level: g, total: sum(totals[i]), median: median(totals[i]), yearly: totals[i], n: rr.filter(r => r.region === g && years.includes(r.year)).length,
-      yearN: years.map(y => rr.filter(r => r.region === g && r.year === y).length) }));
-    const kw = years.length >= 2 ? kruskal(totals) : { p: NaN };
-    const pairs = [];
-    for (let i = 0; i < REGIONS.length; i++) for (let j = i + 1; j < REGIONS.length; j++) pairs.push({ a: REGIONS[i], b: REGIONS[j], ...mannWhitney(totals[i], totals[j]) });
-    const adj = holm(pairs.map(p => Number.isFinite(p.p) ? p.p : 1)); pairs.forEach((p, i) => { p.pHolm = adj[i]; });
-    const order = regions.slice().sort((a, b) => b.median - a.median), leader = order[0].level;
-    const winners = years.map((y, k) => { let best = null; REGIONS.forEach((g, i) => { if (!best || totals[i][k] > best.v) best = { year: y, region: g, v: totals[i][k] }; }); return best; });
-    const limited = years.length < cfg.MIN_YEARS;
-    const st = limited ? 'LIMITED DATA' : status([{ p: kw.p, alpha: cfg.ALPHA }]);
-    const proven = pairs.filter(p => (p.a === leader || p.b === leader) && p.pHolm < cfg.ALPHA).map(p => (p.a === leader ? p.b : p.a));
-    return { years, metric, regions, kw, pairs, leader, proven, winners, status: st, meter: meter(kw.p) };
+    const rr = byType(rows, opt.type), years = fullYears(opt, cfg), key = opt.metric === 'margin' ? 'margin' : 'rev';
+    const units = [];
+    REGIONS.forEach(g => years.forEach(y => { const s = rr.filter(r => r.region === g && r.year === y); units.push({ region: g, year: y, value: sum(s.map(r => r[key])), n: s.length }); }));
+    const tests = years.length >= 2 ? vsRest(units.map(u => u.value), units.map(u => u.region), REGIONS, cfg, { minN: 2 }) : [];
+    tests.forEach(t => { t.nProjects = sum(units.filter(u => u.region === t.level).map(u => u.n)); });
+    const winners = years.map(y => units.filter(u => u.year === y).sort((a, b) => b.value - a.value)[0]);
+    const s = summarise(tests);
+    if (years.length < cfg.MIN_YEARS) { s.status = 'LIMITED DATA'; }
+    return { years, units, tests, winners, metric: key, overall: mean(units.map(u => u.value)), indicative: `indicative: ${years.length} years`, ...s };
   }
 
   // ---- B6
   function b6(rows, data, opt, cfg) {
     const types = TYPES.map(t => {
-      const g = rows.filter(r => r.type === t);
-      const rev = sum(g.map(r => r.rev)), cost = sum(g.map(r => r.cost));
-      let range = [NaN, NaN];
-      if (g.length) {
-        const bs = S.bootstrap(g.length, cfg.BOOTSTRAP_N, cfg.RANDOM_SEED, idx => { let a = 0, c = 0; for (const i of idx) { a += g[i].rev; c += g[i].cost; } return (a - c) / a; });
-        range = [quantile(bs, 0.05), quantile(bs, 0.95)];
-      }
-      return { type: t, n: g.length, nDesigners: new Set(g.map(r => r.designer)).size, rev, cost, margin: rev - cost, marginPct: rev ? (rev - cost) / rev : NaN,
-        marginPerProject: g.length ? (rev - cost) / g.length : NaN, overShare: g.length ? g.filter(r => r.cls === 'Overrun').length / g.length : NaN,
-        earned: rev / sum(g.map(r => r.ah)), range, limited: g.length < cfg.MIN_PROJECTS || new Set(g.map(r => r.designer)).size < cfg.MIN_DESIGNERS };
-    }).filter(t => t.n > 0);
-    const tested = types.filter(t => t.n >= minDes(cfg));
-    const kw = kruskal(tested.map(t => rows.filter(r => r.type === t.type).map(r => 1 - r.pr)));
+      const g = rows.filter(r => r.type === t), o = rows.filter(r => r.type !== t);
+      if (!g.length) return null;
+      const a = S.ratioSE(g.map(r => r.actual), g.map(r => r.planned)), b = S.ratioSE(o.map(r => r.actual), o.map(r => r.planned));
+      const m = 1 - a.R, mr = 1 - b.R, rev = sum(g.map(r => r.rev)), cost = sum(g.map(r => r.cost));
+      const out = { level: t, type: t, n: g.length, nDesigners: new Set(g.map(r => r.designer)).size, mean: m, se: a.se, lo95: m - S.CRIT * a.se, hi95: m + S.CRIT * a.se,
+        restN: o.length, restMean: mr, restSE: b.se, limited: g.length < cfg.MIN_N, rev, cost, margin: rev - cost, marginPerProject: (rev - cost) / g.length,
+        overShare: g.filter(r => r.cls === 'Overrun').length / g.length, earned: rev / sum(g.map(r => r.ah)) };
+      if (!out.limited && o.length >= 2) Object.assign(out, S.test(m, a.se, mr, b.se, cfg.ALPHA));
+      return out;
+    }).filter(Boolean);
     const all = { rev: sum(rows.map(r => r.rev)), cost: sum(rows.map(r => r.cost)) };
     const dept = { marginPct: (all.rev - all.cost) / all.rev, marginPerProject: (all.rev - all.cost) / rows.length };
-    const leader = types.filter(t => !t.limited).sort((a, b) => b.marginPct - a.marginPct)[0] || types[0];
-    const overlap = types.some(t => t !== leader && t.range[1] >= leader.range[0] && t.range[0] <= leader.range[1]);
-    const watching = leader.n < 30 && overlap;
+    const s = summarise(types);
+    const lead = types.slice().sort((a, b) => b.mean - a.mean)[0];
+    const watching = !!lead && lead.limited && types.some(t => t !== lead && t.hi95 >= lead.lo95 && t.lo95 <= lead.hi95);
     const years = [...new Set(rows.map(r => r.year))].sort();
     const trend = TYPES.map(t => ({ type: t, points: years.map(y => { const g = rows.filter(r => r.type === t && r.year === y); const rv = sum(g.map(r => r.rev)); return { year: y, n: g.length, marginPct: rv ? (rv - sum(g.map(r => r.cost))) / rv : null }; }) }));
-    return { types, kw, testedTypes: tested.map(t => t.type), dept, leader: leader.type, watching, trend, status: status([{ p: kw.p, alpha: cfg.ALPHA }]), meter: meter(kw.p) };
+    return { tests: types, types, dept, leader: lead ? lead.type : null, watching, trend, n: rows.length, ...s };
   }
 
   // ================================================================ TAB C · M1
   function fitM1(rows, data, factors, cfg, refs) {
     const des = perfDesign(rows, data, factors, cfg, refs);
     const X = rows.map(des.row), y = rows.map(r => Math.log(r.ah));
-    const fit = ols(y, X, des.names, rows.map(r => r.designer));
+    const fit = ols(y, X, des.names, cfg.ALPHA);
     // empirical-Bayes designer adjustment
     const byD = groupBy(rows.map((r, i) => ({ d: r.designer, e: fit.e[i] })), 'd');
     const md = new Map(); let ssw = 0;
     byD.forEach((v, d) => { const m = mean(v.map(x => x.e)); md.set(d, { n: v.length, mean: m }); v.forEach(x => { ssw += (x.e - m) ** 2; }); });
     const G = md.size, sw = ssw / (rows.length - G);
-    const means = [...md.values()].map(v => v.mean), invN = mean([...md.values()].map(v => 1 / v.n));
-    const sb = Math.max(S.variance(means) - sw * invN, 1e-4), kShrink = sw / sb;
+    const sb = Math.max(S.variance([...md.values()].map(v => v.mean)) - sw * mean([...md.values()].map(v => 1 / v.n)), 1e-4), kShrink = sw / sb;
     const u = new Map(); md.forEach((v, d) => { const w = v.n / (v.n + kShrink); u.set(d, { u: v.mean * w, n: v.n, mean: v.mean, w }); });
     const adj = rows.map((r, i) => fit.e[i] - u.get(r.designer).u);
+    const sigma = Math.sqrt(sum(adj.map(v => v * v)) / (rows.length - fit.k));
     const my = mean(y), sst = sum(y.map(v => (v - my) ** 2));
-    return { des, fit, X, y, rows, u, sw, sb, kShrink, adj, r2: fit.r2, adjR2: fit.adjR2, r2Designer: 1 - sum(adj.map(v => v * v)) / sst,
-      smear: mean(adj.map(Math.exp)), q10: quantile(adj, 0.1), q90: quantile(adj, 0.9), factors };
+    return { des, fit, X, y, rows, u, sw, sb, kShrink, adj, sigma, meanFactor: Math.exp(sigma * sigma / 2), r2: fit.r2, adjR2: fit.adjR2,
+      r2Designer: 1 - sum(adj.map(v => v * v)) / sst, rangeLo: Math.exp(-S.Z80 * sigma), rangeHi: Math.exp(S.Z80 * sigma), factors };
   }
+  /** Median = exp(x'b + u_d); expected = median·exp(σ²/2); 80% range = exp(x'b + u_d ± 1.2816σ). */
   function predictM1(m, x, designer) {
-    const row = m.des.row(x);
-    const lin = row.reduce((s, v, j) => s + v * m.fit.b[j], 0) + (designer && m.u.has(designer) ? m.u.get(designer).u : 0);
+    const lin = m.des.row(x).reduce((s, v, j) => s + v * m.fit.b[j], 0) + (designer && m.u.has(designer) ? m.u.get(designer).u : 0);
     const med = Math.exp(lin);
-    return { median: med, mean: med * m.smear, lo: med * Math.exp(m.q10), hi: med * Math.exp(m.q90) };
+    return { median: med, mean: med * m.meanFactor, lo: med * m.rangeLo, hi: med * m.rangeHi };
   }
-  const xOf = (r, ph) => ({ ph: ph === undefined ? r.ph : ph, type: r.type, edu: r.edu, loc: r.loc, exp: r.exp });
-  function trainingM1(data, cfg) { return data.valid.filter(r => r.year <= cfg.LAST_FULL_YEAR); }
+  const xOf = r => ({ ph: r.ph, type: r.type, edu: r.edu, loc: r.loc, exp: r.exp });
+  const trainingM1 = (data, cfg) => data.valid.filter(r => r.year <= cfg.LAST_FULL_YEAR);
 
   function m1(data, cfg, factors) {
     const train = trainingM1(data, cfg);
     const m = fitM1(train, data, factors, cfg);
-    // backtest
     const tr = train.filter(r => r.year <= cfg.BACKTEST_LAST_TRAIN_YEAR), te = train.filter(r => r.year > cfg.BACKTEST_LAST_TRAIN_YEAR);
-    const mb = fitM1(tr, data, factors, cfg);
-    const ratio = realisedPR(tr);
-    const act = te.map(r => r.ah);
+    const mb = fitM1(tr, data, factors, cfg, m.des.refs), ratio = realisedPR(tr), act = te.map(r => r.ah);
     const metric = (pred, lo, hi) => {
       const err = pred.map((p, i) => p - act[i]);
       return { mae: mean(err.map(Math.abs)), mdape: median(err.map((e, i) => Math.abs(e) / act[i])), bias: sum(pred) / sum(act) - 1,
         coverage: lo ? mean(act.map((a, i) => +(a >= lo[i] && a <= hi[i]))) : null, n: act.length };
     };
     const P = te.map(r => predictM1(mb, xOf(r), r.designer));
-    const backtest = { train: tr.length, test: te.length, plans: metric(te.map(r => r.ph)), ratio: metric(te.map(r => r.ph * ratio)),
-      m1: metric(P.map(p => p.mean), P.map(p => p.lo), P.map(p => p.hi)), ratioValue: ratio };
-    // leave one designer out
+    const backtest = { train: tr.length, test: te.length, ratioValue: ratio, plans: metric(te.map(r => r.ph)), ratio: metric(te.map(r => r.ph * ratio)), m1: metric(P.map(p => p.mean), P.map(p => p.lo), P.map(p => p.hi)) };
     const lodoErr = [];
     [...new Set(train.map(r => r.designer))].forEach(d => {
-      const trd = train.filter(r => r.designer !== d), ted = train.filter(r => r.designer === d);
-      try { const md = fitM1(trd, data, factors, cfg, m.des.refs); ted.forEach(r => lodoErr.push(Math.abs(predictM1(md, xOf(r), null).mean - r.ah))); } catch (e) { /* designer cannot be left out */ }
+      try { const md = fitM1(train.filter(r => r.designer !== d), data, factors, cfg, m.des.refs); train.filter(r => r.designer === d).forEach(r => lodoErr.push(Math.abs(predictM1(md, xOf(r), null).mean - r.ah))); } catch (e) { /* cannot leave this designer out */ }
     });
-    // robustness: Original only
     let robust = null;
     try { const o = fitM1(train.filter(r => r.source === 'Original'), data, factors, cfg, m.des.refs); robust = { n: o.rows.length, coefs: o.fit.coefs, r2: o.r2 }; } catch (e) { robust = null; }
-    // diagnostics
-    const vif = S.vif(m.X, m.des.names), bp = S.breuschPagan(m.fit, m.X), ck = S.cooks(m.fit, m.X);
-    const top = ck.map((c, i) => ({ c, i })).sort((a, b) => b.c - a.c).slice(0, 5).map(o => ({ id: train[o.i].id, designer: train[o.i].designer, cook: o.c, ah: train[o.i].ah, ph: train[o.i].ph }));
-    return { model: m, backtest, lodoMAE: mean(lodoErr), lodoN: lodoErr.length, robust, vif, bp, cooks: top };
+    const ck = S.cooks(m.fit, m.X);
+    const cooks = ck.map((c, i) => ({ c, i })).sort((a, b) => b.c - a.c).slice(0, 5).map(o => ({ id: train[o.i].id, designer: train[o.i].designer, cook: o.c, ah: train[o.i].ah, ph: train[o.i].ph }));
+    return { model: m, backtest, lodoMAE: mean(lodoErr), lodoN: lodoErr.length, robust, vif: S.vif(m.X, m.des.names), bp: S.breuschPagan(m.fit, m.X), cooks };
   }
 
   // ================================================================ TAB C · M2
@@ -450,107 +392,102 @@
   function yearlySeries(rows, metric, cfg, region) {
     const f = METRICS[metric], rr = region ? rows.filter(r => r.region === region) : rows;
     const years = []; for (let y = cfg.FIRST_ANALYSIS_YEAR; y <= cfg.LAST_FULL_YEAR; y++) years.push(y);
-    const val = years.map(y => sum(rr.filter(r => r.year === y).map(f)));
     const hist = rr.filter(r => r.year >= cfg.FIRST_ANALYSIS_YEAR && r.year <= cfg.LAST_FULL_YEAR);
     const share = sum(hist.filter(r => r.month <= cfg.PARTIAL_LAST_MONTH).map(f)) / sum(hist.map(f));
     const partial = sum(rr.filter(r => r.year === cfg.PARTIAL_YEAR).map(f));
-    return { years, values: val, partial, share, estimate: partial / share };
+    return { metric, region: region || null, years, values: years.map(y => sum(rr.filter(r => r.year === y).map(f))), partial, share, estimate: partial / share };
   }
-  function trendFit(xs, ys, shape) {
-    const yy = shape === '% growth' ? ys.map(Math.log) : ys;
-    const n = xs.length, mx = mean(xs), my = mean(yy);
+  /** Simple linear regression y = a + b·year (or ln y for % growth) with ordinary SEs and normal inference. */
+  function trendFit(xs, ys, shape, cfg) {
+    const yy = shape === '% growth' ? ys.map(Math.log) : ys, n = xs.length, mx = mean(xs), my = mean(yy);
     let sxy = 0, sxx = 0; xs.forEach((x, i) => { sxy += (x - mx) * (yy[i] - my); sxx += (x - mx) ** 2; });
-    const b = sxy / sxx, a = my - b * mx;
-    const res = yy.map((v, i) => v - (a + b * xs[i])), sse = sum(res.map(v => v * v)), s = Math.sqrt(sse / (n - 2));
-    const sst = sum(yy.map(v => (v - my) ** 2));
-    return { a, b, s, n, mx, sxx, res, r2: 1 - sse / sst, shape, seB: s / Math.sqrt(sxx), seAc: s / Math.sqrt(n), my };
+    const b = sxy / sxx, a = my - b * mx, res = yy.map((v, i) => v - (a + b * xs[i])), sse = sum(res.map(v => v * v)), s = Math.sqrt(sse / (n - 2));
+    const seB = s / Math.sqrt(sxx), t = b / seB, p = S.pValue(t), crit = S.CRIT;
+    return { a, b, s, n, mx, my, sxx, res, yy, r2: 1 - sse / sum(yy.map(v => (v - my) ** 2)), shape, xs,
+      slope: { b, se: seB, t, crit, p, lo: b - crit * seB, hi: b + crit * seB, reject: p < (cfg ? cfg.ALPHA : 0.05) },
+      centred: { b: my, se: s / Math.sqrt(n), t: my / (s / Math.sqrt(n)), p: S.pValue(my / (s / Math.sqrt(n))), lo: my - crit * s / Math.sqrt(n), hi: my + crit * s / Math.sqrt(n) } };
   }
-  function trendForecast(fit, x0, level = 0.8) {
-    const t = S.tInv(0.5 + level / 2, fit.n - 2);
-    const se = fit.s * Math.sqrt(1 + 1 / fit.n + (x0 - fit.mx) ** 2 / fit.sxx);
-    const m = fit.a + fit.b * x0, lo = m - t * se, hi = m + t * se;
-    if (fit.shape === '% growth') return { y: Math.exp(m), lo: Math.exp(lo), hi: Math.exp(hi), t, se };
-    return { y: Math.max(0, m), lo: Math.max(0, lo), hi: Math.max(0, hi), t, se };
+  /** 80% prediction interval ŷ ± 1.2816·s·√(1 + 1/n + (x0 - x̄)²/Σ(x - x̄)²); never below zero. */
+  function trendForecast(fit, x0) {
+    const se = fit.s * Math.sqrt(1 + 1 / fit.n + (x0 - fit.mx) ** 2 / fit.sxx), m = fit.a + fit.b * x0, lo = m - S.Z80 * se, hi = m + S.Z80 * se;
+    if (fit.shape === '% growth') return { y: Math.exp(m), lo: Math.exp(lo), hi: Math.exp(hi), se, z: S.Z80 };
+    return { y: Math.max(0, m), lo: Math.max(0, lo), hi: Math.max(0, hi), se, z: S.Z80 };
   }
   function m2Series(series, cfg, override) {
+    const val = y => series.values[series.years.indexOf(y)];
     const combos = [];
     cfg.TREND_FIT_START_OPTIONS.forEach(start => cfg.TREND_SHAPES.forEach(shape => {
-      const xs = series.years.filter(y => y >= start && y < cfg.LAST_FULL_YEAR), ys = xs.map(y => series.values[series.years.indexOf(y)]);
-      const e1 = trendForecast(trendFit(xs, ys, shape), cfg.LAST_FULL_YEAR).y / series.values[series.years.indexOf(cfg.LAST_FULL_YEAR)] - 1;
-      const xs2 = series.years.filter(y => y >= start), ys2 = xs2.map(y => series.values[series.years.indexOf(y)]);
-      const e2 = trendForecast(trendFit(xs2, ys2, shape), cfg.PARTIAL_YEAR).y / series.estimate - 1;
+      const xs = series.years.filter(y => y >= start && y < cfg.LAST_FULL_YEAR);
+      const e1 = trendForecast(trendFit(xs, xs.map(val), shape), cfg.LAST_FULL_YEAR).y / val(cfg.LAST_FULL_YEAR) - 1;
+      const xs2 = series.years.filter(y => y >= start);
+      const e2 = trendForecast(trendFit(xs2, xs2.map(val), shape), cfg.PARTIAL_YEAR).y / series.estimate - 1;
       combos.push({ start, shape, errLast: e1, errPartial: e2, mape: (Math.abs(e1) + Math.abs(e2)) / 2 });
     }));
     const best = combos.slice().sort((a, b) => a.mape - b.mape)[0];
-    const chosen = override ? combos.find(c => c.start === override.start && c.shape === override.shape) || best : best;
+    const chosen = (override && combos.find(c => c.start === override.start && c.shape === override.shape)) || best;
     const xs = series.years.filter(y => y >= chosen.start).concat([cfg.PARTIAL_YEAR]);
-    const ys = series.years.filter(y => y >= chosen.start).map(y => series.values[series.years.indexOf(y)]).concat([series.estimate]);
-    const fit = trendFit(xs, ys, chosen.shape), fc = trendForecast(fit, cfg.FORECAST_YEAR);
-    const scen = { average: fc.y, optimistic: fc.hi, pessimistic: Math.min(fc.lo, series.estimate) };
-    return { series, combos, best, chosen, fit, xs, ys, forecast: fc, scenarios: scen, growthStops: series.estimate };
+    const ys = series.years.filter(y => y >= chosen.start).map(val).concat([series.estimate]);
+    const fit = trendFit(xs, ys, chosen.shape, cfg), fc = trendForecast(fit, cfg.FORECAST_YEAR);
+    return { series, combos, best, chosen, overridden: chosen !== best, fit, forecast: fc, dw: S.durbinWatson(fit.res),
+      scenarios: { average: fc.y, optimistic: fc.hi, pessimistic: Math.min(fc.lo, series.estimate) }, growthStops: series.estimate };
   }
   function m2(data, cfg, overrides = {}) {
-    const rows = volumeRows(data, cfg), out = {};
-    Object.keys(METRICS).forEach(k => { out[k] = m2Series(yearlySeries(rows, k, cfg), cfg, overrides[k]); });
-    const regions = {};
-    REGIONS.forEach(g => { regions[g] = {}; ['revenue', 'plannedHours'].forEach(k => { regions[g][k] = m2Series(yearlySeries(rows, k, cfg, g), cfg); }); });
-    return { metrics: out, regions };
+    const rows = volumeRows(data, cfg), metrics = {};
+    Object.keys(METRICS).forEach(k => { metrics[k] = m2Series(yearlySeries(rows, k, cfg), cfg, overrides[k]); });
+    return { metrics, series: (metric, region, ov) => m2Series(yearlySeries(rows, metric, cfg, region), cfg, ov) };
   }
 
   // ================================================================ TAB C · forecasts
   function c1(data, cfg, M1, opt = {}) {
-    const m = M1.model, comp = trainingM1(data, cfg);
-    const designerOpt = opt.designer || 'mix';
+    const m = M1.model, comp = trainingM1(data, cfg), designerOpt = opt.designer || 'mix';
     return TYPES.map(t => {
       const g = comp.filter(r => r.type === t);
       if (!g.length) return null;
       const ph = opt.size === 'average' ? mean(g.map(r => r.ph)) : median(g.map(r => r.ph));
-      let pool = data.valid.filter(r => r.type === t && r.year >= cfg.USUAL_MIX_FIRST_YEAR && r.year <= cfg.LAST_FULL_YEAR);
-      if (!pool.length) pool = data.valid.filter(r => r.type === t);
       let weights;
-      if (designerOpt === 'mix') weights = [...groupBy(pool, 'designer').entries()].map(([d, rr]) => [d, rr.length / pool.length]);
-      else if (designerOpt.startsWith('loc:')) {
+      if (designerOpt === 'mix') {
+        let pool = data.valid.filter(r => r.type === t && r.year >= cfg.USUAL_MIX_FIRST_YEAR && r.year <= cfg.LAST_FULL_YEAR);
+        if (!pool.length) pool = data.valid.filter(r => r.type === t);
+        weights = [...groupBy(pool, 'designer').entries()].map(([d, rr]) => [d, rr.length / pool.length]);
+      } else if (designerOpt.startsWith('loc:')) {
         const l = designerOpt.slice(4), ds = [...data.designers.values()].filter(d => d.loc === l);
-        const cnt = ds.map(d => data.valid.filter(r => r.designer === d.name && r.year <= cfg.LAST_FULL_YEAR).length), tot = sum(cnt);
+        const cnt = ds.map(d => comp.filter(r => r.designer === d.name).length), tot = sum(cnt);
         weights = ds.map((d, i) => [d.name, tot ? cnt[i] / tot : 1 / ds.length]);
       } else weights = [[designerOpt.replace(/^des:/, ''), 1]];
-      let E = 0, C = 0, lo = 0, hi = 0, med = 0, plan = 0;
+      let E = 0, C = 0, lo = 0, hi = 0, plan = 0;
       weights.forEach(([d, w]) => {
         const info = data.designers.get(d);
         const p = predictM1(m, { ph, type: t, edu: info.edu, loc: info.loc, exp: info.yrs - (cfg.EXPERIENCE_AS_OF - cfg.FORECAST_YEAR) }, d);
-        E += w * p.mean; C += w * p.mean * info.rate; lo += w * p.lo * info.rate; hi += w * p.hi * info.rate; med += w * p.median; plan += w * ph * info.rate;
+        E += w * p.mean; C += w * p.mean * info.rate; lo += w * p.lo * info.rate; hi += w * p.hi * info.rate; plan += w * ph * info.rate;
       });
       const typePR = realisedPR(g);
-      return { type: t, n: g.length, plannedH: ph, hours: E, cost: C, lo, hi, plan, pctOfPlan: C / plan, benchmark: plan * typePR, typePR,
+      return { type: t, n: g.length, nDesigners: new Set(g.map(r => r.designer)).size, plannedH: ph, hours: E, cost: C, lo, hi, plan, pctOfPlan: C / plan, benchmark: plan * typePR, typePR,
         limited: m.des.pooled.includes(t) || g.length < cfg.MIN_PROJECTS, pooled: m.des.pooled.includes(t), designers: weights.length };
     }).filter(Boolean);
   }
   function shrunkPR(data, cfg) {
-    const comp = trainingM1(data, cfg), dept = realisedPR(comp), out = new Map();
-    groupBy(comp, 'designer').forEach((rr, d) => { const w = rr.length / (rr.length + cfg.SHRINK_K_PROJECTS); out.set(d, { pr: realisedPR(rr), n: rr.length, w, prs: w * realisedPR(rr) + (1 - w) * dept }); });
-    return { dept, map: out };
+    const comp = trainingM1(data, cfg), dept = realisedPR(comp), map = new Map();
+    groupBy(comp, 'designer').forEach((rr, d) => { const w = rr.length / (rr.length + cfg.SHRINK_K_PROJECTS); map.set(d, { pr: realisedPR(rr), n: rr.length, w, prs: w * realisedPR(rr) + (1 - w) * dept }); });
+    return { dept, map };
   }
   function workload(data, cfg, M2) {
     const rows = volumeRows(data, cfg).filter(r => r.year >= cfg.WORKLOAD_SHARE_FIRST_YEAR && r.year <= cfg.PARTIAL_YEAR);
     const tot = sum(rows.map(r => r.ph)), cells = new Map();
     rows.forEach(r => { const k = r.designer + '|' + r.region; cells.set(k, (cells.get(k) || 0) + r.ph); });
-    const sp = shrunkPR(data, cfg);
-    const out = {};
+    const sp = shrunkPR(data, cfg), out = {};
     ['pessimistic', 'average', 'optimistic'].forEach(sc => {
       const P = M2.metrics.plannedHours.scenarios[sc];
       out[sc] = [...cells.entries()].map(([k, v]) => {
-        const [d, region] = k.split('|'), info = data.designers.get(d), s = sp.map.get(d);
-        const prs = s ? s.prs : sp.dept, share = v / tot, planned = P * share;
-        return { designer: d, region, loc: info.loc, rate: info.rate, share, planned, actual: planned * prs, variance: planned * (prs - 1), money: planned * (prs - 1) * info.rate, prs, n: s ? s.n : 0 };
+        const [d, region] = k.split('|'), info = data.designers.get(d), s = sp.map.get(d), prs = s ? s.prs : sp.dept, share = v / tot, planned = P * share;
+        return { designer: d, region, loc: info.loc, rate: info.rate, share, planned, actual: planned * prs, variance: planned * (prs - 1), money: planned * (prs - 1) * info.rate, prs, n: s ? s.n : 0, w: s ? s.w : 0, pr: s ? s.pr : NaN };
       });
     });
-    return { cells: out, dept: sp.dept, shrink: sp };
+    return { cells: out, dept: sp.dept, shrink: sp, totalPlannedShareBase: tot };
   }
   function c4(data, cfg, M2) {
-    const v = data.valid.filter(r => r.year > cfg.LAST_FULL_YEAR - cfg.COST_RATIO_YEARS && r.year <= cfg.LAST_FULL_YEAR);
-    const ratio = sum(v.map(r => r.cost)) / sum(v.map(r => r.rev));
-    const vol = volumeRows(data, cfg).filter(r => r.year > cfg.LAST_FULL_YEAR - cfg.COST_RATIO_YEARS && r.year <= cfg.LAST_FULL_YEAR);
-    const totRev = sum(vol.map(r => r.rev));
+    const last = r => r.year > cfg.LAST_FULL_YEAR - cfg.COST_RATIO_YEARS && r.year <= cfg.LAST_FULL_YEAR;
+    const v = data.valid.filter(last), ratio = sum(v.map(r => r.cost)) / sum(v.map(r => r.rev));
+    const vol = volumeRows(data, cfg).filter(last), totRev = sum(vol.map(r => r.rev));
     const shares = { region: REGIONS.map(g => ({ key: g, share: sum(vol.filter(r => r.region === g).map(r => r.rev)) / totRev })),
       type: TYPES.map(t => ({ key: t, share: sum(vol.filter(r => r.type === t).map(r => r.rev)) / totRev })) };
     const sc = {};
@@ -558,12 +495,13 @@
       const rev = M2.metrics.revenue.scenarios[k], cost = rev * ratio;
       sc[k] = { revenue: rev, cost, margin: rev - cost, marginPct: (rev - cost) / rev, projects: M2.metrics.projects.scenarios[k] };
     });
-    return { ratio, shares, scenarios: sc, range: { revenue: [M2.metrics.revenue.forecast.lo, M2.metrics.revenue.forecast.hi], projects: [M2.metrics.projects.forecast.lo, M2.metrics.projects.forecast.hi] } };
+    return { ratio, shares, scenarios: sc, ratioYears: [cfg.LAST_FULL_YEAR - cfg.COST_RATIO_YEARS + 1, cfg.LAST_FULL_YEAR],
+      range: { revenue: [M2.metrics.revenue.forecast.lo, M2.metrics.revenue.forecast.hi], projects: [M2.metrics.projects.forecast.lo, M2.metrics.projects.forecast.hi] } };
   }
 
-  const api = { TYPES, REGIONS, EDUS, CLASSES, ym, ymYear, ymMonth, prepare, refLevel, groupBy, realisedPR, bandLabels, expBand, meter, status,
-    allocation, tabA, rowsB, fullYears, designerTable, b1, b1Output, b1Performance, performanceFactors, b2, b3, b4, b5, b6,
-    perfDesign, fitM1, predictM1, m1, yearlySeries, trendFit, trendForecast, m2Series, m2, c1, shrunkPR, workload, c4, volumeRows };
+  const api = { TYPES, REGIONS, EDUS, CLASSES, ym, ymYear, ymMonth, prepare, refLevel, groupBy, realisedPR, bandLabels, expBand, meter,
+    allocation, tabA, rowsB, fullYears, summarise, designerYears, designerTable, b1, performanceFactors, b2, b3, b4, b5, b6, factorOf,
+    perfDesign, fitM1, predictM1, m1, trainingM1, yearlySeries, trendFit, trendForecast, m2Series, m2, c1, shrunkPR, workload, c4, volumeRows };
   root.DDAnalysis = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);

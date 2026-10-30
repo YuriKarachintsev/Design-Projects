@@ -26,6 +26,8 @@ const { chromium } = require('playwright');
     const m = await upload(f);
     const ok = m.cls.includes('ok') && m.text.startsWith('Data loaded: 3 projects');
     log.push([`template ${path.extname(f)}`, ok ? 'PASS (loaded 3 projects)' : 'FAIL ' + m.text]); if (!ok) fails.push(btn);
+    for (const k of ['A', 'B', 'C', 'D']) { await p.click(`#tabs button[data-tab="${k}"]`); await p.waitForTimeout(500); }
+    if (btn === '#D-tpl-xlsx') log.push(['all tabs with the 3-row file', errs.length ? 'ERRORS' : 'PASS (no errors)']);
     await p.click('#D-reset'); await p.waitForTimeout(300);
   }
   if (await fp() !== builtin) fails.push('reset did not restore built-in data');
