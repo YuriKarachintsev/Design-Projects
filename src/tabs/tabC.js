@@ -1,4 +1,4 @@
-/* Tab C · Prediction: the models (M1 project model, M2 trend model) and the 2027 forecasts (C1-C4). */
+/* Tab C · Forecast: the models (M1 project model, M2 trend model) and the 2027 forecasts (C1-C4). */
 (function () {
   const DD = window.DD, A = DD.A, F = DD.fmt, cfg = DD.cfg;
   const root = () => document.getElementById('tab-C');
@@ -25,7 +25,6 @@
     el.innerHTML = `<div class="bar"><div class="bar-row">
         <div class="ctl"><span class="label">Forecast year</span><span class="data-chip" style="padding:4px 10px">${cfg.FORECAST_YEAR}</span></div>
         <div class="ctl"><span class="label">Scenario (drives C2–C4)</span><div id="C-scen"></div></div>
-        <div class="ctl"><span class="label">Statistics</span><div id="C-stats"></div></div>
       </div><div class="summary-line" id="C-summary"></div></div>
       <div class="subhead"><h2 class="section-title">The models</h2><span class="rule"></span></div>
       <div class="grid"><div class="card c12" id="M1"></div></div>
@@ -34,7 +33,6 @@
       <div class="grid"><div class="card c7" id="C1"></div><div class="card c5" id="C4"></div></div>
       <div class="grid"><div class="card c6" id="C2"></div><div class="card c6" id="C3"></div></div>`;
     DD.seg(el.querySelector('#C-scen'), SC, st.scenario, v => { st.scenario = v; DD.writeHash(); renderC2(); renderC3(); renderC4(); renderSummary(); });
-    DD.seg(el.querySelector('#C-stats'), [['off', 'Off'], ['on', 'On']], st.stats ? 'on' : 'off', v => DD.setAllDrawers('C', v === 'on'));
     el.addEventListener('click', e => { const b = e.target.closest('.built-on'); if (b) document.getElementById(b.dataset.to).scrollIntoView({ behavior: DD.reducedMotion ? 'auto' : 'smooth', block: 'start' }); });
   }
   function update() {
@@ -48,7 +46,7 @@
   }
   function renderSummary() {
     const m = M1.model;
-    root().querySelector('#C-summary').innerHTML = `All sources (the original extract alone is incomplete) · M1 trained on <b>${F.n(m.rows.length)}</b> completed projects ≤ ${cfg.LAST_FULL_YEAR} · factors from tab B: <b>${DD.perf.factors.length ? DD.perf.factors.join(', ') : 'none'}</b> · scenario <b>${scen()}</b> · tests use critical value ${F.x(cfg.CRITICAL_VALUE, 2)} and the normal distribution`;
+    root().querySelector('#C-summary').innerHTML = `All sources (the original extract alone is incomplete) · M1 trained on <b>${F.n(m.rows.length)}</b> completed projects ≤ ${cfg.LAST_FULL_YEAR} · factors from Data Analysis (tab B): <b>${DD.perf.factors.length ? DD.perf.factors.join(', ') : 'none'}</b> · scenario <b>${scen()}</b> · tests use critical value ${F.x(cfg.CRITICAL_VALUE, 2)} and the normal distribution`;
   }
 
   // ================================================================ M1
@@ -80,7 +78,7 @@
         <div class="tile"><div class="label">Backtest total error ${cfg.BACKTEST_LAST_TRAIN_YEAR + 1}–${cfg.LAST_FULL_YEAR}</div><div class="v">${F.pct(bt.m1.bias, true)}</div><div class="s">our plans ${F.pct(bt.plans.bias, true)} · n = ${F.n(bt.test)}</div></div>
         <div class="tile"><div class="label">Plan +10% gives</div><div class="v">${F.pct(Math.pow(1.1, b1.b) - 1, true)}</div><div class="s">actual hours (b1 = ${F.x(b1.b, 3)})</div></div></div>
       <div class="equation">${equation(m)}</div>` +
-      DD.calc(`<code>ln(actual h) = b0 + b1·ln(planned h) + type terms + factor terms + designer adjustment</code>, fitted by OLS on ${F.n(m.rows.length)} completed projects (Actual &gt; 0, start ≤ ${cfg.LAST_FULL_YEAR}). Factor terms come from tab B: ${DD.perf.factors.join(', ') || 'none'}. Prediction: median = e^(x'b + u_d); expected value = median × e^(σ²/2) = median × ${F.x(m.meanFactor, 3)}; 80% range = e^(x'b + u_d ± 1.2816·σ), σ = ${F.x(m.sigma, 3)}.`);
+      DD.calc(`<code>ln(actual h) = b0 + b1·ln(planned h) + type terms + factor terms + designer adjustment</code>, fitted by OLS on ${F.n(m.rows.length)} completed projects (Actual &gt; 0, start ≤ ${cfg.LAST_FULL_YEAR}). Factor terms come from Data Analysis (tab B): ${DD.perf.factors.join(', ') || 'none'}. Prediction: median = e^(x'b + u_d); expected value = median × e^(σ²/2) = median × ${F.x(m.meanFactor, 3)}; 80% range = e^(x'b + u_d ± 1.2816·σ), σ = ${F.x(m.sigma, 3)}.`);
     const sig = m.fit.coefs.filter(c => c.reject && !['Intercept', 'ln(planned hours)'].includes(c.name));
     card.querySelector('.headline').innerHTML = `Plans are the best single guide, but not exact: +10% on the plan adds only <span class="num">${F.pct(Math.pow(1.1, b1.b) - 1, true)}</span> actual hours, so big projects are over-planned more.` +
       (sig.length ? ` On the same plan, ${DD.list(sig.map(c => `${c.name.replace('Education: ', '').replace('Location: ', '').replace('Type', 'Type')} ${F.pct(Math.exp(c.b) - 1, true)}`))} (vs ${m.des.refs.edu.toLowerCase()}, ${m.des.refs.loc}, Type 1).` : '') +
@@ -99,7 +97,7 @@
     const rob = M1.robust;
     return `<h4>1 · Specification</h4><p><code>ln(actual h) = b0 + b1·ln(planned h) + type terms + factor terms + designer adjustment + error</code>. Logs because hours run from ${F.n(Math.min(...m.rows.map(r => r.ah)))} to ${F.n(Math.max(...m.rows.map(r => r.ah)))}, errors are multiplicative, and b1 is an elasticity: +10% plan gives +(1.1^b1 − 1) = ${F.pct(Math.pow(1.1, b1.b) - 1, true)} actual. References: Type 1, ${m.des.refs.edu}, ${m.des.refs.loc}. Type terms only for types with ≥ ${cfg.MIN_PROJECTS} completed projects${m.des.pooled.length ? `; Type ${m.des.pooled.join(', ')} pooled into Type 1 (limited data)` : ''}.</p>
       <h4>2 · Coefficients (ordinary SEs, critical value ${F.x(cfg.CRITICAL_VALUE, 2)}, normal p-values)</h4>${DD.table([['name', 'Term'], ['b', 'Estimate', v => F.x(v, 4)], ['se', 'SE', v => F.x(v, 4)], ['t', 't-stat', v => F.x(v, 2)], ['crit', 'Critical', v => F.x(v, 2)], ['p', 'p-value', F.p], ['lo', '95% CI', (v, r) => `${F.x(r.lo, 3)} … ${F.x(r.hi, 3)}`], ['reject', 'Decision', (v, r) => decision(r)], ['pct', '% effect', v => F.pct(v, true)], ['reading', 'Plain reading']], coefRows)}
-      <h4>3 · Factor selection (tab B, B1 performance "All together")</h4><p>A factor is included when at least one of its coefficients is rejected at 5%.</p>${DD.table([['level', 'Coefficient'], ['b', 'b', v => F.x(v, 4)], ['t', 't-stat', v => F.x(v, 2)], ['p', 'p-value', (v, r) => F.p(v) + (v >= 0.05 && v < 0.10 ? ' · borderline' : '')], ['reject', 'Decision', (v, r) => decision(r)], ['inc', 'Factor included', v => (v ? 'yes' : 'no')]], perf)}
+      <h4>3 · Factor selection (Data Analysis, B1 performance "All together")</h4><p>A factor is included when at least one of its coefficients is rejected at 5%.</p>${DD.table([['level', 'Coefficient'], ['b', 'b', v => F.x(v, 4)], ['t', 't-stat', v => F.x(v, 2)], ['p', 'p-value', (v, r) => F.p(v) + (v >= 0.05 && v < 0.10 ? ' · borderline' : '')], ['reject', 'Decision', (v, r) => decision(r)], ['inc', 'Factor included', v => (v ? 'yes' : 'no')]], perf)}
       <h4>4 · Fit</h4><table><tr><th>n</th><th>Designers</th><th>R²</th><th>Adjusted R²</th><th>R² with designer adj.</th><th>Residual SD before</th><th>σ after</th><th>e^(σ²/2)</th></tr>
         <tr><td>${F.n(m.rows.length)}</td><td>${m.u.size}</td><td>${F.x(m.r2, 3)}</td><td>${F.x(m.adjR2, 3)}</td><td>${F.x(m.r2Designer, 3)}</td><td>${F.x(m.fit.resSD, 3)}</td><td>${F.x(m.sigma, 3)}</td><td>${F.x(m.meanFactor, 3)}</td></tr></table>
       <div class="grid" style="margin:8px 0"><div class="c6"><div class="label">Residuals and the fitted normal curve</div><div class="chart short" id="M1-d-hist"></div></div><div class="c6"><div class="label">Q-Q plot</div><div class="chart short" id="M1-d-qq"></div></div></div>

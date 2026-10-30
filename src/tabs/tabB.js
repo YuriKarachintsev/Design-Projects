@@ -1,4 +1,4 @@
-/* Tab B · Hypotheses: simple standard-error tests (each group vs the rest, critical value 1.96). */
+/* Tab B · Data Analysis: simple standard-error tests (each group vs the rest, critical value 1.96). */
 (function () {
   const DD = window.DD, A = DD.A, F = DD.fmt, cfg = DD.cfg;
   const root = () => document.getElementById('tab-B');
@@ -18,7 +18,7 @@
     B5: 'Which region brings the most revenue in bulk?',
     B6: 'Which project type should we grow?',
   };
-  let rows = [], opt = {};
+  let rows = [], opt = {}, picker = null;
   const results = {};
 
   // ---------------------------------------------------------------- shared helpers
@@ -276,10 +276,8 @@
   // ================================================================ rendering
   function build() {
     const el = root(), d = DD.data, st = DD.state;
-    const years = []; for (let y = Math.max(cfg.FIRST_ANALYSIS_YEAR, A.ymYear(d.minYM)); y <= A.ymYear(d.maxYM); y++) years.push(y);
     el.innerHTML = `<div class="bar"><div class="bar-row">
-        <div class="ctl"><span class="label">Period (shared with Overview)</span><div style="display:flex;gap:6px;align-items:center"><input type="month" id="B-from" aria-label="From"><span class="muted">–</span><input type="month" id="B-to" aria-label="To"></div></div>
-        <div class="ctl"><span class="label">Presets</span><div class="presets" id="B-presets"><button class="chip" data-p="all">All</button>${years.map(y => `<button class="chip" data-p="from${y}">From ${y}</button>`).join('')}</div></div>
+        <div class="ctl"><span class="label">Period (shared with Overview)</span><div id="B-period"></div></div>
         <div class="ctl"><span class="label">Data</span><div id="B-data"></div></div>
         <div class="ctl"><span class="label">Statistics</span><div id="B-stats"></div></div>
         <div class="ctl"><span class="label">&nbsp;</span><button class="btn" id="B-expand">Expand all</button></div>
@@ -304,10 +302,7 @@
     DD.seg(el.querySelector('#B-data'), [['all', `All ${F.n(d.valid.length)}`], ['original', 'Original only']], st.B.source, v => { st.B.source = v; update(); });
     DD.seg(el.querySelector('#B-stats'), [['off', 'Off'], ['on', 'On']], st.B.stats ? 'on' : 'off', v => DD.setAllDrawers('B', v === 'on'));
     el.querySelector('#B-expand').addEventListener('click', e => { const all = Object.keys(FN).every(k => st.B.open.includes(k)); Object.keys(FN).forEach(k => setOpen(k, !all)); e.target.textContent = all ? 'Expand all' : 'Collapse all'; });
-    const parse = v => { const m = /^(\d{4})-(\d{2})$/.exec(v); return m ? A.ym(+m[1], +m[2]) : null; };
-    el.querySelector('#B-from').addEventListener('change', e => { const v = parse(e.target.value); if (v !== null) { st.A.from = v; DD.clampPeriod(); DD.tabs.A.dirty = true; update(); } });
-    el.querySelector('#B-to').addEventListener('change', e => { const v = parse(e.target.value); if (v !== null) { st.A.to = v; DD.clampPeriod(); DD.tabs.A.dirty = true; update(); } });
-    el.querySelectorAll('#B-presets button').forEach(b => b.addEventListener('click', () => { const p = b.dataset.p; st.A.from = p === 'all' ? d.minYM : Math.max(d.minYM, A.ym(+p.slice(4), 1)); st.A.to = d.maxYM; DD.tabs.A.dirty = true; update(); }));
+    picker = DD.periodPicker(el.querySelector('#B-period'), 'B', (f, t) => { st.A.from = f; st.A.to = t; DD.tabs.A.dirty = true; update(); });
   }
   function setOpen(k, open) {
     const st = DD.state.B, row = root().querySelector(`#${k}-row`), card = root().querySelector(`#${k}-card`);
@@ -353,7 +348,7 @@
     DD.clampPeriod();
     opt = { from: st.A.from, to: st.A.to, source: st.B.source };
     rows = A.rowsB(DD.data, opt);
-    el.querySelector('#B-from').value = F.ymIso(st.A.from); el.querySelector('#B-to').value = F.ymIso(st.A.to);
+    picker.set(st.A.from, st.A.to, DD.data.minYM, DD.data.maxYM);
     el.querySelector('#B-summary').innerHTML = `${F.ym(st.A.from)} – ${F.ym(st.A.to)} · ${st.B.source === 'original' ? 'Original rows only' : 'All sources'} · <b>${F.n(rows.length)}</b> projects · <b>${new Set(rows.map(r => r.designer)).size}</b> designers · each group tested against the rest at critical value ${F.x(cfg.CRITICAL_VALUE, 2)} · Overview's type and region filters do not apply here`;
     Object.keys(FN).forEach(k => { results[k] = safe(k); renderRow(k); });
     st.B.open.forEach(k => { root().querySelector(`#${k}-row`).setAttribute('aria-expanded', 'true'); root().querySelector(`#${k}-card`).classList.add('open'); renderCard(k); });

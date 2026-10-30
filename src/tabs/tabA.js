@@ -4,18 +4,14 @@
   const root = () => document.getElementById('tab-A');
   const local = { a1Sort: 'hours', a1Plan: false, a2Metric: 'hours', a2Cum: true, a2Plan: false, a2Layout: 'combined', a3Sort: 'revenue', a3Gap: false, a3HideZero: true,
     a3Frame: null, a3Playing: false, a5View: 'cpph', a4Basis: 'project', a4Metric: 'revenue' };
-  let timer = null;
+  let timer = null, picker = null;
 
   function build() {
     const el = root(), d = DD.data;
-    const years = []; for (let y = A.ymYear(d.minYM); y <= A.ymYear(d.maxYM); y++) years.push(y);
     el.innerHTML = `
       <div class="bar" id="A-bar">
         <div class="bar-row">
-          <div class="ctl"><span class="label">Period</span><div style="display:flex;gap:6px;align-items:center"><label class="sr-only" for="A-from">From</label><input type="month" id="A-from"><span class="muted">–</span><label class="sr-only" for="A-to">To</label><input type="month" id="A-to"></div></div>
-          <div class="ctl"><span class="label">Presets</span><div class="presets" id="A-presets">
-            <button class="chip" data-p="all">All</button><button class="chip" data-p="l12">Last 12 months</button><button class="chip" data-p="ytd">YTD</button>
-            ${years.map(y => `<button class="chip" data-p="y${y}">${y}</button>`).join('')}</div></div>
+          <div class="ctl"><span class="label">Period</span><div id="A-period"></div></div>
           <div class="ctl"><span class="label">Project type</span><div class="chips" id="A-types"></div></div>
           <div class="ctl"><span class="label">Project region</span><div class="chips" id="A-regions"></div></div>
           <div class="ctl"><span class="label">Granularity</span><div id="A-gran"></div></div>
@@ -67,18 +63,7 @@
     }));
     DD.seg(el.querySelector('#A-gran'), [['monthly', 'Monthly'], ['yearly', 'Yearly']], st.gran, v => { st.gran = v; local.a3Frame = null; update(); });
     DD.seg(el.querySelector('#A-attr'), [['start', 'Start month'], ['spread', 'Spread over duration']], st.attr, v => { st.attr = v; update(); });
-    const from = el.querySelector('#A-from'), to = el.querySelector('#A-to');
-    const parse = v => { const m = /^(\d{4})-(\d{2})$/.exec(v); return m ? A.ym(+m[1], +m[2]) : null; };
-    from.addEventListener('change', () => { const v = parse(from.value); if (v !== null) { st.from = v; DD.clampPeriod(); update(true); } });
-    to.addEventListener('change', () => { const v = parse(to.value); if (v !== null) { st.to = v; DD.clampPeriod(); local.a3Frame = null; update(true); } });
-    el.querySelectorAll('#A-presets button').forEach(b => b.addEventListener('click', () => {
-      const p = b.dataset.p, d = DD.data;
-      if (p === 'all') { st.from = d.minYM; st.to = d.maxYM; }
-      else if (p === 'l12') { st.to = d.maxYM; st.from = Math.max(d.minYM, d.maxYM - 11); }
-      else if (p === 'ytd') { st.to = d.maxYM; st.from = A.ym(A.ymYear(d.maxYM), 1); }
-      else { const y = +p.slice(1); st.from = Math.max(d.minYM, A.ym(y, 1)); st.to = Math.min(d.maxYM, A.ym(y, 12)); }
-      local.a3Frame = null; update(true);
-    }));
+    picker = DD.periodPicker(el.querySelector('#A-period'), 'A', (f, t) => { st.from = f; st.to = t; local.a3Frame = null; update(true); });
     const reset = () => { Object.assign(st, { from: DD.data.minYM, to: DD.data.maxYM, types: [1, 2, 3, 4], regions: ['North', 'East', 'South', 'West'], gran: 'monthly', attr: 'start' }); local.a3Frame = null; build(); update(true); };
     el.querySelector('#A-reset').addEventListener('click', reset);
     el.querySelector('#A-reset2').addEventListener('click', reset);
@@ -110,8 +95,7 @@
   function update(periodChanged) {
     const st = DD.state.A, el = root();
     DD.clampPeriod();
-    el.querySelector('#A-from').value = F.ymIso(st.from);
-    el.querySelector('#A-to').value = F.ymIso(st.to);
+    picker.set(st.from, st.to, DD.data.minYM, DD.data.maxYM);
     if (periodChanged || !el.querySelector('#A-brush')._init) { DD.charts.brush(el.querySelector('#A-brush'), DD.data, st.from, st.to, (f, t) => { st.from = f; st.to = t; local.a3Frame = null; update(); }); el.querySelector('#A-brush')._init = true; }
     rowsF = DD.data.valid.filter(r => st.types.includes(r.type) && st.regions.includes(r.region));
     M = A.tabA(DD.data, { from: st.from, to: st.to, types: st.types, regions: st.regions, granularity: st.gran, attribution: st.attr, regionBasis: local.a4Basis === 'home' ? 'home' : 'project' }, DD.cfg);

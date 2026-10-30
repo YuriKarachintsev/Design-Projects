@@ -46,8 +46,9 @@ designer, cost per planned hour and earned per hour worked.
 
 `node tests/verify_dashboard.js` — Chromium, `file://`, network disabled.
 
-67 segmented toggles, 54 select options, 16 type/region chips, 23 period presets, 8 checkboxes, play/pause, the empty
-state, 12 analyst drawers opened and 12 closed, Statistics On/Off on tabs B and C, data toggle, expand/collapse,
+67 segmented toggles, 54 select options, 16 type/region chips, 4 period-calendar picks on tabs A and B (with checks that
+the To calendar disables every month before From and the From calendar every month after To), 8 checkboxes, play/pause,
+the empty state, 12 analyst drawers opened and 12 closed, Statistics On/Off on tab B, data toggle, expand/collapse,
 accordion rows, 3 scenarios, 4 "Built on" chips, an upload and a reset. **Console errors: 0. Network requests: 0.**
 No horizontal scrolling at 1024 or 820 px. 42 section screenshots in `screenshots/` (1440 and 1024 px).
 

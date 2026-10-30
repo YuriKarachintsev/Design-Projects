@@ -57,7 +57,27 @@ const SHOTS = path.join(ROOT, 'screenshots');
   await clickAll('#tab-A', '.seg button', 'toggles');
   await clickAll('#tab-A', '#A-types .chip', 'type chips'); await clickAll('#tab-A', '#A-types .chip', 'type chips');
   await clickAll('#tab-A', '#A-regions .chip', 'region chips'); await clickAll('#tab-A', '#A-regions .chip', 'region chips');
-  await clickAll('#tab-A', '#A-presets .chip', 'period presets', 250);
+  // period calendars: pick From = Mar 2020 and To = Jun 2022; To may not go before From
+  async function pick(prefix, k, year, month) {
+    await page.click(`#${prefix}-${k} .mp-btn`);
+    await page.selectOption(`#${prefix}-${k} .mp-year`, String(year));
+    await page.click(`#${prefix}-${k} .mp-grid button[data-m="${month - 1}"]`); count('calendar picks'); await page.waitForTimeout(250);
+  }
+  await pick('A', 'from', 2020, 3); await pick('A', 'to', 2022, 6);
+  const per = await page.evaluate(() => [window.DD.fmt.ymIso(window.DD.state.A.from), window.DD.fmt.ymIso(window.DD.state.A.to)]);
+  if (per.join() !== '2020-03,2022-06') failures.push('calendar pick gave ' + per);
+  await page.click('#A-to .mp-btn');
+  const toYears = await page.$$eval('#A-to .mp-year option', o => o.map(x => x.value));
+  if (toYears[0] !== '2020') failures.push('To calendar offers years before From: ' + toYears[0]);
+  await page.selectOption('#A-to .mp-year', '2020');
+  const dis = await page.$$eval('#A-to .mp-grid button', b => b.map(x => x.disabled));
+  if (!(dis[0] && dis[1] && !dis[2])) failures.push('To calendar allows months before From: ' + dis); else count('end-before-start blocked');
+  await page.keyboard.press('Escape');
+  await page.click('#A-from .mp-btn'); await page.selectOption('#A-from .mp-year', '2022');
+  const disF = await page.$$eval('#A-from .mp-grid button', b => b.map(x => x.disabled));
+  if (!(!disF[5] && disF[6])) failures.push('From calendar allows months after To: ' + disF); else count('start-after-end blocked');
+  await page.keyboard.press('Escape');
+  if (await page.$('#A-presets, #B-presets')) failures.push('period presets still present');
   for (const id of ['#A1-plan', '#A2-plan', '#A3-gap', '#A3-zero']) { await page.click(id); await page.click(id); count('checkboxes', 2); }
   await page.click('#A3-play'); await page.waitForTimeout(1500); await page.click('#A3-play'); count('play/pause', 2);
   await page.$eval('#A3-scrub', el => { el.value = 2; el.dispatchEvent(new Event('input')); });
@@ -78,8 +98,10 @@ const SHOTS = path.join(ROOT, 'screenshots');
   await drawers('#tab-B');
   await page.click('#B-stats button[data-k="on"]'); await page.click('#B-stats button[data-k="off"]'); count('statistics switch', 2);
   await clickAll('#tab-B', '#B-data button', 'data toggle', 400);
-  await clickAll('#tab-B', '#B-presets .chip', 'period presets', 300);
-  await page.click('#B-presets .chip[data-p="all"]'); await page.click('#B-data button[data-k="all"]');
+  await pick('B', 'from', 2019, 1); await pick('B', 'to', 2024, 12);
+  const perB = await page.evaluate(() => [window.DD.fmt.ymIso(window.DD.state.A.from), window.DD.fmt.ymIso(window.DD.state.A.to)]);
+  if (perB.join() !== '2019-01,2024-12') failures.push('tab B calendar pick gave ' + perB);
+  await page.click('#B-data button[data-k="all"]');
   await page.click('#B-expand'); count('collapse all');
   for (const k of ['B1', 'B3']) { await page.click(`#${k}-row`); await page.click(`#${k}-row`); count('accordion rows', 2); }
 
@@ -91,7 +113,7 @@ const SHOTS = path.join(ROOT, 'screenshots');
   await page.click('#C-scen button[data-k="average"]');
   await clickAll('#tab-C', '.built-on', 'built-on chips', 300);
   await drawers('#tab-C');
-  await page.click('#C-stats button[data-k="on"]'); await page.waitForTimeout(800); await page.click('#C-stats button[data-k="off"]'); count('statistics switch', 2);
+  if (await page.$('#C-stats')) failures.push('tab C still has a Statistics switch');
   await page.click('#M2-start button[data-k="auto"]'); await page.click('#M2-shape button[data-k="auto"]');
 
   // ---------------- tab D: one upload and a reset

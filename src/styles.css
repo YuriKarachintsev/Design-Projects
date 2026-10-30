@@ -6,7 +6,7 @@
   --loc-south: #A9B9CC; --loc-east: #8299B3; --loc-west: #5E7A99; --loc-north: #3F5A78;
   --under: #8C99AA; --over: #8E2F45;
   --gate-bg: #EFE3C4; --gate-ink: #6B4F14;
-  --flap: #ECEBE7; --flap-line: #D7D5CF;
+  --flap: #ECEBE7;
   --f-title: 'Barlow Condensed', 'Arial Narrow', sans-serif;
   --f-mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
   --f-body: 'IBM Plex Sans', -apple-system, 'Segoe UI', sans-serif;
@@ -66,8 +66,23 @@ section.tab.on { display: block; animation: fadein .45s var(--ease); }
 .btn:hover { border-color: var(--ink); }
 .btn.ink { background: var(--ink); color: #fff; border-color: var(--ink); }
 input[type=month], input[type=number], select { border: 1px solid var(--line-strong); border-radius: 3px; background: var(--panel); padding: 4px 8px; font: 500 12px var(--f-mono); }
-.presets { display: flex; gap: 4px; flex-wrap: wrap; max-width: 520px; }
-.presets .chip { padding: 3px 7px; font-size: 11px; }
+.period { display: flex; gap: 6px; align-items: center; }
+.mp { position: relative; }
+.mp-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line-strong); border-radius: 3px; background: var(--panel); padding: 4px 8px; cursor: pointer; font: 500 12px var(--f-mono); color: var(--ink); }
+.mp-btn:hover, .mp-btn[aria-expanded="true"] { border-color: var(--ink); }
+.mp-k { color: var(--ink-3); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; }
+.mp-ic { color: var(--ink-3); font-size: 10px; }
+.mp-pop { position: absolute; z-index: 40; top: calc(100% + 4px); left: 0; width: 216px; background: var(--panel); border: 1px solid var(--ink); border-radius: 3px; padding: 8px; box-shadow: 0 6px 18px rgba(31,42,55,.12); }
+.mp-pop[hidden] { display: none; }
+.mp-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 8px; }
+.mp-head select { flex: 1; text-align: center; }
+.mp-nav { border: 1px solid var(--line-strong); background: var(--panel); border-radius: 3px; width: 26px; height: 26px; cursor: pointer; font: 500 14px var(--f-mono); color: var(--ink); }
+.mp-nav:disabled { opacity: .3; cursor: default; }
+.mp-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+.mp-grid button { border: 1px solid transparent; background: none; border-radius: 3px; padding: 6px 0; cursor: pointer; font: 500 12px var(--f-mono); color: var(--ink); }
+.mp-grid button:hover:not(:disabled) { border-color: var(--line-strong); background: var(--bg); }
+.mp-grid button[aria-pressed="true"] { background: var(--ink); color: #fff; }
+.mp-grid button:disabled { color: var(--ink-3); opacity: .45; cursor: not-allowed; }
 .brush { height: 40px; width: 100%; margin-top: 8px; }
 
 /* ---------- grid + cards ---------- */
@@ -100,8 +115,6 @@ details.calc code, .formula { font: 12px var(--f-mono); color: var(--ink); backg
 .flaps { display: flex; gap: 2px; align-items: stretch; height: 34px; }
 .flap { position: relative; min-width: 18px; padding: 0 2px; background: var(--flap); border-radius: 2px; display: grid; place-items: center; font: 500 21px/1 var(--f-mono); color: var(--ink); overflow: hidden; }
 .flap.sep { background: none; min-width: 8px; padding: 0; }
-.flap::after { content: ''; position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: var(--flap-line); }
-.flap.sep::after { display: none; }
 .flap.flip span { animation: flip .5s var(--ease); display: inline-block; }
 @keyframes flip { 0% { transform: rotateX(90deg); opacity: .2; } 60% { transform: rotateX(-12deg); opacity: 1; } 100% { transform: none; } }
 .delta { margin-top: 7px; font: 500 11.5px var(--f-mono); color: var(--ink-2); }

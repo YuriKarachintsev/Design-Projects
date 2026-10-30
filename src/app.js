@@ -78,7 +78,7 @@
     tab: 'A',
     A: { from: null, to: null, types: [1, 2, 3, 4], regions: ['North', 'East', 'South', 'West'], gran: 'monthly', attr: 'start' },
     B: { source: 'all', stats: false, open: [] },
-    C: { scenario: 'average', stats: false, overrides: {} },
+    C: { scenario: 'average', overrides: {} },
   };
   DD.readHash = function () {
     const h = new URLSearchParams(location.hash.slice(1));
@@ -184,4 +184,57 @@
     document.querySelectorAll(`#tab-${tab} .analyst-wrap`).forEach(w => w.setOpen(open));
   };
   DD.table = (cols, rows, opts = {}) => `<div class="scroll"><table${opts.cls ? ` class="${opts.cls}"` : ''}><thead><tr>${cols.map(c => `<th>${c[1]}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr${r._hl ? ' class="hl"' : ''}>${cols.map(c => `<td>${c[2] ? c[2](r[c[0]], r) : DD.esc(r[c[0]] ?? '–')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+  /** Period picker: two calendar drop-downs (From, To) of whole months. To can never be earlier than From:
+   *  months before From are disabled in the To calendar, and months after To are disabled in the From calendar.
+   *  onChange(from, to) fires with the new pair. */
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  DD.periodPicker = function (host, idPrefix, onChange) {
+    host.classList.add('period');
+    host.innerHTML = ['from', 'to'].map(k => `<div class="mp" id="${idPrefix}-${k}">
+      <button type="button" class="mp-btn" aria-haspopup="dialog" aria-expanded="false" aria-label="${k === 'from' ? 'From' : 'To'} month"><span class="mp-k">${k === 'from' ? 'From' : 'To'}</span><span class="mp-v"></span><span class="mp-ic" aria-hidden="true">▾</span></button>
+      <div class="mp-pop" role="dialog" aria-label="Choose the ${k === 'from' ? 'start' : 'end'} month" hidden>
+        <div class="mp-head"><button type="button" class="mp-nav" data-d="-1" aria-label="Previous year">‹</button><select class="mp-year" aria-label="Year"></select><button type="button" class="mp-nav" data-d="1" aria-label="Next year">›</button></div>
+        <div class="mp-grid">${MONTHS.map((m, i) => `<button type="button" data-m="${i}">${m}</button>`).join('')}</div>
+      </div></div>`).join('<span class="muted">–</span>');
+    const st = { from: 0, to: 0, min: 0, max: 0 };
+    const parts = {};
+    ['from', 'to'].forEach(k => {
+      const box = host.querySelector(`#${idPrefix}-${k}`), btn = box.querySelector('.mp-btn'), pop = box.querySelector('.mp-pop'), sel = box.querySelector('.mp-year');
+      let year = 0;
+      const lim = () => k === 'from' ? [st.min, st.to] : [st.from, st.max];
+      const draw = () => {
+        const [lo, hi] = lim(), cur = st[k];
+        sel.innerHTML = ''; for (let y = Math.floor(lo / 12); y <= Math.floor(hi / 12); y++) sel.add(new Option(String(y), String(y), false, y === year));
+        box.querySelectorAll('.mp-nav').forEach(b => { b.disabled = (year + +b.dataset.d) * 12 + (+b.dataset.d > 0 ? 0 : 11) < lo || (year + +b.dataset.d) * 12 > hi; });
+        box.querySelectorAll('.mp-grid button').forEach(b => {
+          const v = year * 12 + +b.dataset.m;
+          b.disabled = v < lo || v > hi;
+          b.setAttribute('aria-pressed', String(v === cur));
+          b.title = v < lo && k === 'to' ? 'Before the From month' : v > hi && k === 'from' ? 'After the To month' : v < lo || v > hi ? 'Outside the data' : '';
+        });
+      };
+      const open = now => {
+        if (now) { Object.values(parts).forEach(p => p !== parts[k] && p.open(false)); year = Math.floor(st[k] / 12); draw(); }
+        pop.hidden = !now; btn.setAttribute('aria-expanded', String(now));
+        if (now) (pop.querySelector('.mp-grid button[aria-pressed="true"]') || sel).focus();
+      };
+      btn.addEventListener('click', () => open(pop.hidden));
+      sel.addEventListener('change', () => { year = +sel.value; draw(); });
+      box.querySelectorAll('.mp-nav').forEach(b => b.addEventListener('click', () => { year += +b.dataset.d; draw(); }));
+      box.querySelectorAll('.mp-grid button').forEach(b => b.addEventListener('click', () => {
+        st[k] = year * 12 + +b.dataset.m; open(false); btn.focus(); onChange(st.from, st.to);
+      }));
+      pop.addEventListener('keydown', e => { if (e.key === 'Escape') { open(false); btn.focus(); } });
+      parts[k] = { open, btn, box };
+    });
+    const outside = e => { if (!host.isConnected) return document.removeEventListener('mousedown', outside); if (!host.contains(e.target)) Object.values(parts).forEach(p => p.open(false)); };
+    document.addEventListener('mousedown', outside);
+    return {
+      set(from, to, min, max) {
+        Object.assign(st, { from, to, min, max });
+        parts.from.box.querySelector('.mp-v').textContent = DD.fmt.ym(from);
+        parts.to.box.querySelector('.mp-v').textContent = DD.fmt.ym(to);
+      },
+    };
+  };
 })();

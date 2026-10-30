@@ -1,4 +1,4 @@
-"""Build the Design Department Performance & Prediction Dashboard.
+"""Build the Design Department Performance & Forecast Dashboard.
 
     python build.py --input data/Report2_extended_adjusted.xlsx
 

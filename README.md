@@ -1,4 +1,4 @@
-# Design Department · Performance & Prediction Dashboard
+# Design Department · Performance & Forecast Dashboard
 
 One self-contained file, **`dist/dashboard.html`** (≈ 2.8 MB). Double-click it to open in Chrome, Edge, Firefox
 or Safari. It works fully offline: data, JavaScript, CSS, fonts and libraries (ECharts 5.5.1, jStat 1.9.6,
@@ -7,8 +7,8 @@ SheetJS 0.18.5) are all inlined.
 | Tab | What it answers |
 |---|---|
 | **A · Overview** | Descriptive view: KPI departure board, hours by designer, cumulative output by project type, year-to-date revenue vs cost "race", rate efficiency, regional comparison. Live filters (period, type, region, granularity, attribution). |
-| **B · Hypotheses** | Six questions (experience/education/location, same-size projects, cost per planned hour, overruns, regional revenue, project type to grow), each answered in plain words with a simple standard-error test of every group against the rest. |
-| **C · Prediction** | M1 project model (actual hours from planned hours, type, education, location, designer track record) and M2 trend model, feeding the 2027 forecasts: typical project cost, workload, overrun/underrun and revenue, under pessimistic / average / optimistic scenarios. |
+| **B · Data Analysis** | Six questions (experience/education/location, same-size projects, cost per planned hour, overruns, regional revenue, project type to grow), each answered in plain words with a simple standard-error test of every group against the rest. |
+| **C · Forecast** | M1 project model (actual hours from planned hours, type, education, location, designer track record) and M2 trend model, feeding the 2027 forecasts: typical project cost, workload, overrun/underrun and revenue, under pessimistic / average / optimistic scenarios. |
 | **D · Data** | Upload a new `.xlsx` / `.xls` / `.csv` file. A pass/fail check against the required format; on pass, every tab is recalculated. |
 
 All statistics run in the browser on the row-level data, so filters are live and an uploaded file updates every tab.
